@@ -728,11 +728,11 @@ const CreateSessionWithNameIntentHandler = {
   }
 };
 
-// Enhanced handler for date inputs and session creation flow
-const DateInputIntentHandler = {
+// Updated DateIntentHandler (formerly DateInputIntentHandler)
+const DateIntentHandler = {
   canHandle(handlerInput) {
     return Alexa.getRequestType(handlerInput.requestEnvelope) === 'IntentRequest' &&
-           Alexa.getIntentName(handlerInput.requestEnvelope) === 'DateInputIntent';
+           Alexa.getIntentName(handlerInput.requestEnvelope) === 'DateIntent';
   },
   async handle(handlerInput) {
     const sessionAttributes = handlerInput.attributesManager.getSessionAttributes();
@@ -894,7 +894,7 @@ const HelpIntentHandler = {
            Alexa.getIntentName(handlerInput.requestEnvelope) === 'AMAZON.HelpIntent';
   },
   handle(handlerInput) {
-    const speechText = 'You can mark your attendance by saying: "mark present", "mark absent", or "mark holiday for [holiday name]". You can also ask for "monthly attendance" or "session attendance" to get your percentage. To create a session, say "create session" or "create session Summer 2024". What would you like to do?';
+    const speechText = 'You can mark your attendance by saying: "mark present", "mark absent", or "mark holiday for [holiday name]". You can also ask for "monthly attendance" or "session attendance" to get your percentage. To create a session, say "create session" or "create session Summer 2024". When asked for dates, you can say things like "June first 2024" or "2024-06-01". What would you like to do?';
     
     return handlerInput.responseBuilder
       .speak(speechText)
@@ -958,6 +958,7 @@ const ErrorHandler = {
 };
 
 // Create Alexa Skill
+const skillBuilder = Alexa.SkillBuilders.custom();
 const skill = skillBuilder
   .addRequestHandlers(
     LaunchRequestHandler,
@@ -969,7 +970,7 @@ const skill = skillBuilder
     SelectSessionIntentHandler,
     CreateSessionIntentHandler,
     CreateSessionWithNameIntentHandler,
-    DateInputIntentHandler, // Make sure this line is present
+    DateIntentHandler, // Updated from DateInputIntentHandler to DateIntentHandler
     YesIntentHandler,
     NoIntentHandler,
     HelpIntentHandler,
@@ -1018,5 +1019,3 @@ app.get('*', (req, res) => {
 
 // Export for Vercel
 module.exports = app;
-
-
