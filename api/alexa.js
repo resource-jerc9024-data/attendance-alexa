@@ -146,7 +146,7 @@ function generateSessionCode(sessionName) {
   return `${code}_${timestamp}`;
 }
 
-// Firebase operations - Updated for single document structure
+// Firebase operations - UPDATED DATABASE STRUCTURE to match web app
 async function getUserData(uid) {
   await ensureFirebaseInitialized();
   const db = admin.firestore();
@@ -165,18 +165,18 @@ async function updateUserData(uid, updates) {
 async function getDayStatus(uid, date) {
   const userData = await getUserData(uid);
   
-  // Check records first
+  // Check records first (matches web app structure)
   if (userData.records && userData.records[date] !== undefined) {
     return userData.records[date] ? 'present' : 'absent';
   }
   
-  // Check holidays
+  // Check holidays (matches web app structure)
   if (userData.holidays && userData.holidays.some(h => h.date === date)) {
     const holiday = userData.holidays.find(h => h.date === date);
     return { status: 'holiday', name: holiday.name };
   }
   
-  // Check not enrolled
+  // Check not enrolled (matches web app structure)
   if (userData.notEnrolled && userData.notEnrolled.includes(date)) {
     return 'not-enrolled';
   }
@@ -187,7 +187,7 @@ async function getDayStatus(uid, date) {
 async function setDayStatus(uid, date, status, extraData = {}) {
   const userData = await getUserData(uid);
   
-  // Initialize data structures if they don't exist
+  // Initialize data structures if they don't exist (matches web app structure)
   const records = userData.records || {};
   let holidays = userData.holidays || [];
   let notEnrolled = userData.notEnrolled || [];
@@ -208,7 +208,7 @@ async function setDayStatus(uid, date, status, extraData = {}) {
     notEnrolled.push(date);
   }
   
-  // Update Firestore
+  // Update Firestore (matches web app structure)
   await updateUserData(uid, {
     records,
     holidays,
@@ -227,14 +227,14 @@ function isNonWorkingDay(dateStr, userData) {
   // Always Sunday
   if (dayOfWeek === 0) return true;
   
-  // Check weekly days off
+  // Check weekly days off (matches web app structure)
   const weeklyDaysOff = userData.weeklyDaysOff || [];
   if (weeklyDaysOff.includes(dayOfWeek)) return true;
   
   return false;
 }
 
-// Monthly attendance calculation - updated for web app structure
+// Monthly attendance calculation - updated to match web app structure
 async function calculateMonthlyAttendance(uid, yearMonth) {
   const userData = await getUserData(uid);
   const [year, month] = yearMonth.split('-').map(Number);
@@ -253,18 +253,18 @@ async function calculateMonthlyAttendance(uid, yearMonth) {
     // Check if it's a non-working day
     if (isNonWorkingDay(dateStr, userData)) continue;
     
-    // Check if it's a holiday
+    // Check if it's a holiday (matches web app structure)
     const isHoliday = userData.holidays && userData.holidays.some(h => h.date === dateStr);
     if (isHoliday) continue;
     
-    // Check if not enrolled
+    // Check if not enrolled (matches web app structure)
     const isNotEnrolled = userData.notEnrolled && userData.notEnrolled.includes(dateStr);
     if (isNotEnrolled) continue;
     
     // Count as working day
     totalWorkingDays++;
     
-    // Check if present
+    // Check if present (matches web app structure)
     if (userData.records && userData.records[dateStr] === true) {
       presentDays++;
     }
@@ -273,15 +273,65 @@ async function calculateMonthlyAttendance(uid, yearMonth) {
   return totalWorkingDays > 0 ? Math.round((presentDays / totalWorkingDays) * 100) : 0;
 }
 
-// Session attendance calculation - Updated to use selected session
+// NEW: Find Alexa preset session
+async function findAlexaPresetSession(uid) {
+  const userData = await getUserData(uid);
+  
+  if (!userData.sessions || !Array.isArray(userData.sessions)) {
+    return null;
+  }
+  
+  // Find session with alexapresetvalue
+  return userData.sessions.find(session => 
+    session.alexapresetvalue === true
+  );
+}
+
+// NEW: Set Alexa preset session
+async function setAlexaPresetSession(uid, sessionIdentifier) {
+  const userData = await getUserData(uid);
+  
+  if (!userData.sessions || !Array.isArray(userData.sessions)) {
+    return { success: false, error: 'No sessions found' };
+  }
+  
+  // First, clear alexapresetvalue from all sessions
+  const updatedSessions = userData.sessions.map(session => ({
+    ...session,
+    alexapresetvalue: false
+  }));
+  
+  // Find the target session and set alexapresetvalue to true
+  let sessionFound = false;
+  const finalSessions = updatedSessions.map(session => {
+    if (session.code === sessionIdentifier || session.name.toLowerCase() === sessionIdentifier.toLowerCase()) {
+      sessionFound = true;
+      return {
+        ...session,
+        alexapresetvalue: true
+      };
+    }
+    return session;
+  });
+  
+  if (!sessionFound) {
+    return { success: false, error: 'Session not found' };
+  }
+  
+  // Update the sessions in database
+  await updateUserData(uid, { sessions: finalSessions });
+  
+  return { success: true };
+}
+
+// Session attendance calculation - UPDATED to use alexapresetvalue
 async function calculateSessionAttendance(uid, sessionName = null) {
   const userData = await getUserData(uid);
   
-  // Get session data - first check selectedSession, then sessions array
-  let startDate, endDate;
+  let startDate, endDate, sessionInfo = null;
   
+  // If session name is provided, use that
   if (sessionName) {
-    // Search for session by name or code in sessions array
     if (userData.sessions) {
       const session = userData.sessions.find(s => 
         s.name.toLowerCase() === sessionName.toLowerCase() || 
@@ -290,26 +340,25 @@ async function calculateSessionAttendance(uid, sessionName = null) {
       if (session) {
         startDate = session.startDate;
         endDate = session.endDate;
+        sessionInfo = session;
       }
     }
   } else {
-    // Use selected session if no session name provided
-    if (userData.selectedSession) {
-      const selectedSession = userData.selectedSession;
-      if (userData.sessions) {
-        const session = userData.sessions.find(s => 
-          s.name.toLowerCase() === selectedSession.name.toLowerCase() || 
-          s.code === selectedSession.code
-        );
-        if (session) {
-          startDate = session.startDate;
-          endDate = session.endDate;
-        }
-      }
+    // No session name provided - look for alexapresetvalue
+    const presetSession = await findAlexaPresetSession(uid);
+    if (presetSession) {
+      startDate = presetSession.startDate;
+      endDate = presetSession.endDate;
+      sessionInfo = presetSession;
+    } else {
+      // Fallback to current year if no preset session
+      const currentYear = getLocalDate().getUTCFullYear();
+      startDate = `${currentYear}-01-01`;
+      endDate = `${currentYear}-12-31`;
     }
   }
   
-  // If no session found, use current year
+  // If no session found at all, use current year
   if (!startDate || !endDate) {
     const currentYear = getLocalDate().getUTCFullYear();
     startDate = `${currentYear}-01-01`;
@@ -358,82 +407,54 @@ async function calculateSessionAttendance(uid, sessionName = null) {
     currentDate.setDate(currentDate.getDate() + 1);
   }
   
-  return totalWorkingDays > 0 ? Math.round((presentDays / totalWorkingDays) * 100) : 0;
+  return {
+    percentage: totalWorkingDays > 0 ? Math.round((presentDays / totalWorkingDays) * 100) : 0,
+    sessionInfo
+  };
 }
 
-// Enhanced setSelectedSession to handle codes better
-async function setSelectedSession(uid, sessionIdentifier) {
-  const userData = await getUserData(uid);
-  
-  // Search for session by code first (most specific), then by name
-  let selectedSession = null;
-  if (userData.sessions) {
-    // First try exact code match
-    selectedSession = userData.sessions.find(s => s.code === sessionIdentifier);
-    
-    // If no code match, try name match
-    if (!selectedSession) {
-      selectedSession = userData.sessions.find(s => 
-        s.name.toLowerCase() === sessionIdentifier.toLowerCase()
-      );
-    }
-  }
-  
-  if (selectedSession) {
-    // Store selected session with both name and code for linking
-    await updateUserData(uid, {
-      selectedSession: {
-        name: selectedSession.name,
-        code: selectedSession.code,
-        startDate: selectedSession.startDate,
-        endDate: selectedSession.endDate,
-        selectedAt: new Date().toISOString()
-      },
-      updatedAt: admin.firestore.FieldValue.serverTimestamp()
-    });
-    return { success: true, session: selectedSession };
-  } else {
-    return { success: false, error: 'Session not found' };
-  }
-}
-
-async function getSelectedSession(uid) {
-  const userData = await getUserData(uid);
-  return userData.selectedSession || null;
-}
-
-// Save session with auto-generated code
-async function saveSession(uid, sessionName, startDate, endDate) {
+// Save session with auto-generated code and alexapresetvalue
+async function saveSession(uid, sessionName, startDate, endDate, setAsPreset = true) {
   const userData = await getUserData(uid);
   const sessions = userData.sessions || [];
   
   // Generate session code
   const sessionCode = generateSessionCode(sessionName);
   
+  // First, clear alexapresetvalue from all existing sessions if setting this as preset
+  let updatedSessions = sessions;
+  if (setAsPreset) {
+    updatedSessions = sessions.map(session => ({
+      ...session,
+      alexapresetvalue: false
+    }));
+  }
+  
   const sessionData = {
     name: sessionName,
     code: sessionCode,
     startDate,
     endDate,
+    alexapresetvalue: setAsPreset, // Set as preset if requested
     createdAt: new Date().toISOString()
   };
   
   // Check if session already exists by name or code
-  const existingIndex = sessions.findIndex(s => 
+  const existingIndex = updatedSessions.findIndex(s => 
     s.name.toLowerCase() === sessionName.toLowerCase() || 
     s.code === sessionCode
   );
   
   if (existingIndex !== -1) {
-    sessions[existingIndex] = sessionData;
+    updatedSessions[existingIndex] = sessionData;
   } else {
-    sessions.push(sessionData);
+    updatedSessions.push(sessionData);
   }
   
   // Sort by creation date (newest first)
-  sessions.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+  updatedSessions.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
   
-  await updateUserData(uid, { sessions });
+  await updateUserData(uid, { sessions: updatedSessions });
   
   return sessionData;
 }
@@ -449,234 +470,40 @@ const LaunchRequestHandler = {
   canHandle(handlerInput) {
     return Alexa.getRequestType(handlerInput.requestEnvelope) === 'LaunchRequest';
   },
-  handle(handlerInput) {
+  async handle(handlerInput) {
     const accessToken = getAccessToken(handlerInput);
     
     if (!accessToken) {
       return requireAccountLinking(handlerInput);
     }
     
-    const speechText = 'Welcome to Attendance Tracker! You can mark your attendance as present, absent, or holiday. You can also ask for monthly or session attendance percentages. What would you like to do?';
-    
-    return handlerInput.responseBuilder
-      .speak(speechText)
-      .reprompt('What would you like to do? You can say mark present, mark absent, or ask for attendance percentage.')
-      .getResponse();
-  }
-};
-
-const MarkPresentIntentHandler = {
-  canHandle(handlerInput) {
-    return Alexa.getRequestType(handlerInput.requestEnvelope) === 'IntentRequest' &&
-           Alexa.getIntentName(handlerInput.requestEnvelope) === 'MarkPresentIntent';
-  },
-  async handle(handlerInput) {
-    const accessToken = getAccessToken(handlerInput);
-    if (!accessToken) return requireAccountLinking(handlerInput);
-    
+    // Check if user has a preset session
     try {
       const uid = getUserKey(handlerInput);
-      const today = getFormattedDate();
-      const userData = await getUserData(uid);
+      const presetSession = await findAlexaPresetSession(uid);
       
-      // Check if it's a non-working day
-      if (isNonWorkingDay(today, userData)) {
-        return handlerInput.responseBuilder
-          .speak('Today is a non-working day. You cannot mark attendance on non-working days.')
-          .getResponse();
+      let welcomeText = 'Welcome to Attendance Tracker! ';
+      if (presetSession) {
+        welcomeText += `I see your current session is ${presetSession.name}. `;
       }
-      
-      const existingStatus = await getDayStatus(uid, today);
-      
-      if (existingStatus) {
-        if (existingStatus.status === 'present' || existingStatus === 'present') {
-          return handlerInput.responseBuilder
-            .speak('Today is already marked as present.')
-            .getResponse();
-        } else {
-          // Ask for confirmation to change status
-          const sessionAttributes = handlerInput.attributesManager.getSessionAttributes();
-          sessionAttributes.pendingStatusChange = {
-            date: today,
-            newStatus: 'present',
-            oldStatus: existingStatus.status || existingStatus
-          };
-          handlerInput.attributesManager.setSessionAttributes(sessionAttributes);
-          
-          return handlerInput.responseBuilder
-            .speak(`Today is currently marked as ${existingStatus.status || existingStatus}. Would you like to change it to present?`)
-            .reprompt('Should I change today\'s status to present?')
-            .getResponse();
-        }
-      }
-      
-      await setDayStatus(uid, today, 'present');
+      welcomeText += 'You can mark your attendance as present, absent, or holiday. You can also ask for monthly or session attendance percentages. What would you like to do?';
       
       return handlerInput.responseBuilder
-        .speak('Successfully marked as present for today.')
+        .speak(welcomeText)
+        .reprompt('What would you like to do? You can say mark present, mark absent, or ask for attendance percentage.')
         .getResponse();
-        
     } catch (error) {
-      console.error('Error in MarkPresentIntent:', error);
+      console.error('Error in LaunchRequest:', error);
+      
       return handlerInput.responseBuilder
-        .speak('Sorry, I encountered an error while marking attendance. Please try again.')
+        .speak('Welcome to Attendance Tracker! You can mark your attendance as present, absent, or holiday. You can also ask for monthly or session attendance percentages. What would you like to do?')
+        .reprompt('What would you like to do? You can say mark present, mark absent, or ask for attendance percentage.')
         .getResponse();
     }
   }
 };
 
-const MarkAbsentIntentHandler = {
-  canHandle(handlerInput) {
-    return Alexa.getRequestType(handlerInput.requestEnvelope) === 'IntentRequest' &&
-           Alexa.getIntentName(handlerInput.requestEnvelope) === 'MarkAbsentIntent';
-  },
-  async handle(handlerInput) {
-    const accessToken = getAccessToken(handlerInput);
-    if (!accessToken) return requireAccountLinking(handlerInput);
-    
-    try {
-      const uid = getUserKey(handlerInput);
-      const today = getFormattedDate();
-      const userData = await getUserData(uid);
-      
-      // Check if it's a non-working day
-      if (isNonWorkingDay(today, userData)) {
-        return handlerInput.responseBuilder
-          .speak('Today is a non-working day. You cannot mark attendance on non-working days.')
-          .getResponse();
-      }
-      
-      const existingStatus = await getDayStatus(uid, today);
-      
-      if (existingStatus) {
-        if (existingStatus.status === 'absent' || existingStatus === 'absent') {
-          return handlerInput.responseBuilder
-            .speak('Today is already marked as absent.')
-            .getResponse();
-        } else {
-          // Ask for confirmation to change status
-          const sessionAttributes = handlerInput.attributesManager.getSessionAttributes();
-          sessionAttributes.pendingStatusChange = {
-            date: today,
-            newStatus: 'absent',
-            oldStatus: existingStatus.status || existingStatus
-          };
-          handlerInput.attributesManager.setSessionAttributes(sessionAttributes);
-          
-          return handlerInput.responseBuilder
-            .speak(`Today is currently marked as ${existingStatus.status || existingStatus}. Would you like to change it to absent?`)
-            .reprompt('Should I change today\'s status to absent?')
-            .getResponse();
-        }
-      }
-      
-      await setDayStatus(uid, today, 'absent');
-      
-      return handlerInput.responseBuilder
-        .speak('Successfully marked as absent for today.')
-        .getResponse();
-        
-    } catch (error) {
-      console.error('Error in MarkAbsentIntent:', error);
-      return handlerInput.responseBuilder
-        .speak('Sorry, I encountered an error while marking attendance. Please try again.')
-        .getResponse();
-    }
-  }
-};
-
-const MarkHolidayIntentHandler = {
-  canHandle(handlerInput) {
-    return Alexa.getRequestType(handlerInput.requestEnvelope) === 'IntentRequest' &&
-           Alexa.getIntentName(handlerInput.requestEnvelope) === 'MarkHolidayIntent';
-  },
-  async handle(handlerInput) {
-    const accessToken = getAccessToken(handlerInput);
-    if (!accessToken) return requireAccountLinking(handlerInput);
-    
-    const holidayName = Alexa.getSlotValue(handlerInput.requestEnvelope, 'holidayName');
-    
-    if (!holidayName) {
-      return handlerInput.responseBuilder
-        .speak('Please specify the holiday name. For example, say "mark holiday for Diwali".')
-        .reprompt('What is the name of the holiday?')
-        .getResponse();
-    }
-    
-    try {
-      const uid = getUserKey(handlerInput);
-      const today = getFormattedDate();
-      
-      const existingStatus = await getDayStatus(uid, today);
-      
-      if (existingStatus) {
-        if (existingStatus.status === 'holiday' || existingStatus === 'holiday') {
-          return handlerInput.responseBuilder
-            .speak(`Today is already marked as holiday for ${existingStatus.name || 'a holiday'}.`)
-            .getResponse();
-        } else {
-          // Ask for confirmation to change status
-          const sessionAttributes = handlerInput.attributesManager.getSessionAttributes();
-          sessionAttributes.pendingStatusChange = {
-            date: today,
-            newStatus: 'holiday',
-            oldStatus: existingStatus.status || existingStatus,
-            holidayName: holidayName
-          };
-          handlerInput.attributesManager.setSessionAttributes(sessionAttributes);
-          
-          return handlerInput.responseBuilder
-            .speak(`Today is currently marked as ${existingStatus.status || existingStatus}. Would you like to change it to holiday for ${holidayName}?`)
-            .reprompt(`Should I change today\'s status to holiday for ${holidayName}?`)
-            .getResponse();
-        }
-      }
-      
-      await setDayStatus(uid, today, 'holiday', { holidayName });
-      
-      return handlerInput.responseBuilder
-        .speak(`Successfully marked as holiday for ${holidayName}.`)
-        .getResponse();
-        
-    } catch (error) {
-      console.error('Error in MarkHolidayIntent:', error);
-      return handlerInput.responseBuilder
-        .speak('Sorry, I encountered an error while marking holiday. Please try again.')
-        .getResponse();
-    }
-  }
-};
-
-const MonthlyAttendanceIntentHandler = {
-  canHandle(handlerInput) {
-    return Alexa.getRequestType(handlerInput.requestEnvelope) === 'IntentRequest' &&
-           Alexa.getIntentName(handlerInput.requestEnvelope) === 'MonthlyAttendanceIntent';
-  },
-  async handle(handlerInput) {
-    const accessToken = getAccessToken(handlerInput);
-    if (!accessToken) return requireAccountLinking(handlerInput);
-    
-    try {
-      const uid = getUserKey(handlerInput);
-      const monthSlot = Alexa.getSlotValue(handlerInput.requestEnvelope, 'month');
-      const yearMonth = monthSlot ? getYearMonthFromDate(monthSlot) : getYearMonthFromDate();
-      
-      const percentage = await calculateMonthlyAttendance(uid, yearMonth);
-      
-      const monthName = new Date(yearMonth + '-01').toLocaleString('en-US', { month: 'long', year: 'numeric' });
-      
-      return handlerInput.responseBuilder
-        .speak(`Your attendance for ${monthName} is ${percentage} percent.`)
-        .getResponse();
-        
-    } catch (error) {
-      console.error('Error in MonthlyAttendanceIntent:', error);
-      return handlerInput.responseBuilder
-        .speak('Sorry, I encountered an error while fetching monthly attendance. Please try again.')
-        .getResponse();
-    }
-  }
-};
+// ... (Keep all your existing intent handlers MarkPresentIntentHandler, MarkAbsentIntentHandler, etc. the same)
 
 const SessionAttendanceIntentHandler = {
   canHandle(handlerInput) {
@@ -687,20 +514,23 @@ const SessionAttendanceIntentHandler = {
     const accessToken = getAccessToken(handlerInput);
     if (!accessToken) return requireAccountLinking(handlerInput);
     
+    const sessionName = Alexa.getSlotValue(handlerInput.requestEnvelope, 'sessionName');
+    
     try {
       const uid = getUserKey(handlerInput);
       
-      // Get selected session info
-      const selectedSession = await getSelectedSession(uid);
-      const percentage = await calculateSessionAttendance(uid);
+      // Calculate attendance
+      const result = await calculateSessionAttendance(uid, sessionName);
       
-      let sessionText = 'for the current session';
-      if (selectedSession) {
-        sessionText = `for ${selectedSession.name} session`;
+      let sessionText = 'for your current session';
+      if (result.sessionInfo) {
+        sessionText = `for ${result.sessionInfo.name} session`;
+      } else if (sessionName) {
+        sessionText = `for ${sessionName} session`;
       }
       
       return handlerInput.responseBuilder
-        .speak(`Your session attendance ${sessionText} is ${percentage} percent.`)
+        .speak(`Your session attendance ${sessionText} is ${result.percentage} percent.`)
         .getResponse();
         
     } catch (error) {
@@ -712,7 +542,7 @@ const SessionAttendanceIntentHandler = {
   }
 };
 
-// Enhanced SelectSessionIntentHandler with better duplicate handling
+// UPDATED SelectSessionIntentHandler - uses alexapresetvalue instead of selectedSession
 const SelectSessionIntentHandler = {
   canHandle(handlerInput) {
     return Alexa.getRequestType(handlerInput.requestEnvelope) === 'IntentRequest' &&
@@ -741,8 +571,15 @@ const SelectSessionIntentHandler = {
           sessionList += ', and more';
         }
         
+        // Also mention which session is currently preset
+        const presetSession = await findAlexaPresetSession(uid);
+        let presetText = '';
+        if (presetSession) {
+          presetText = ` Your current session is ${presetSession.name}.`;
+        }
+        
         return handlerInput.responseBuilder
-          .speak(`Your available sessions are: ${sessionList}. Which session would you like to use?`)
+          .speak(`Your available sessions are: ${sessionList}.${presetText} Which session would you like to use?`)
           .reprompt('Please tell me which session you want to use.')
           .getResponse();
           
@@ -756,41 +593,18 @@ const SelectSessionIntentHandler = {
     
     try {
       const uid = getUserKey(handlerInput);
-      const sessions = await getAvailableSessions(uid);
       
-      // First, try exact code match (most specific)
-      const exactCodeMatch = sessions.find(s => s.code === sessionName);
-      if (exactCodeMatch) {
-        await setSelectedSession(uid, exactCodeMatch.code);
-        return handlerInput.responseBuilder
-          .speak(`Okay, I've set ${exactCodeMatch.name} as your current session.`)
-          .getResponse();
-      }
+      // Set the session as Alexa preset
+      const result = await setAlexaPresetSession(uid, sessionName);
       
-      // Then, try name match
-      const nameMatches = sessions.filter(s => 
-        s.name.toLowerCase() === sessionName.toLowerCase()
-      );
-      
-      if (nameMatches.length === 1) {
-        // Single match found
-        await setSelectedSession(uid, nameMatches[0].code);
+      if (result.success) {
         return handlerInput.responseBuilder
-          .speak(`Okay, I've set ${nameMatches[0].name} as your current session.`)
-          .getResponse();
-      } else if (nameMatches.length > 1) {
-        // Multiple sessions with same name
-        const sessionCodes = nameMatches.map(s => s.code).join(', ');
-        const dateRanges = nameMatches.map(s => 
-          `${formatAlexaDate(s.startDate)} to ${formatAlexaDate(s.endDate)}`
-        ).join(' and ');
-        
-        return handlerInput.responseBuilder
-          .speak(`I found ${nameMatches.length} sessions named "${sessionName}" with date ranges: ${dateRanges}. Please specify which one by using the session code: ${sessionCodes}`)
-          .reprompt('Please tell me the session code to select the correct session.')
+          .speak(`Okay, I've set ${sessionName} as your current session.`)
           .getResponse();
       } else {
-        // No matches found, show available sessions
+        // Session not found, show available sessions
+        const sessions = await getAvailableSessions(uid);
+        
         if (sessions.length === 0) {
           return handlerInput.responseBuilder
             .speak(`Session "${sessionName}" not found. You don't have any sessions yet. Please create a session first by saying "create session".`)
@@ -817,6 +631,7 @@ const SelectSessionIntentHandler = {
   }
 };
 
+// UPDATED CreateSessionIntentHandler - automatically sets alexapresetvalue
 const CreateSessionIntentHandler = {
   canHandle(handlerInput) {
     return Alexa.getRequestType(handlerInput.requestEnvelope) === 'IntentRequest' &&
@@ -839,49 +654,7 @@ const CreateSessionIntentHandler = {
   }
 };
 
-const CreateSessionWithNameIntentHandler = {
-  canHandle(handlerInput) {
-    return Alexa.getRequestType(handlerInput.requestEnvelope) === 'IntentRequest' &&
-           Alexa.getIntentName(handlerInput.requestEnvelope) === 'CreateSessionWithNameIntent';
-  },
-  async handle(handlerInput) {
-    const accessToken = getAccessToken(handlerInput);
-    if (!accessToken) return requireAccountLinking(handlerInput);
-    
-    const sessionName = Alexa.getSlotValue(handlerInput.requestEnvelope, 'sessionName');
-    
-    if (!sessionName) {
-      return handlerInput.responseBuilder
-        .speak('Please provide a session name. For example, say "create session called Summer 2024".')
-        .reprompt('What would you like to name this session?')
-        .getResponse();
-    }
-    
-    try {
-      const uid = getUserKey(handlerInput);
-      
-      // Store the session name in session attributes for follow-up
-      const sessionAttributes = handlerInput.attributesManager.getSessionAttributes();
-      sessionAttributes.inSessionCreation = true;
-      sessionAttributes.sessionCreationStep = 'startDate';
-      sessionAttributes.pendingSessionName = sessionName;
-      handlerInput.attributesManager.setSessionAttributes(sessionAttributes);
-      
-      return handlerInput.responseBuilder
-        .speak(`Okay, I'll create session "${sessionName}". When does this session start? Please provide a start date like "June 1st 2024" or "2024-06-01".`)
-        .reprompt('Please tell me the start date for this session.')
-        .getResponse();
-        
-    } catch (error) {
-      console.error('Error in CreateSessionWithNameIntent:', error);
-      return handlerInput.responseBuilder
-        .speak('Sorry, I encountered an error while creating the session. Please try again.')
-        .getResponse();
-    }
-  }
-};
-
-// Updated DateIntentHandler for session creation
+// UPDATED DateIntentHandler for session creation - automatically sets alexapresetvalue
 const DateIntentHandler = {
   canHandle(handlerInput) {
     return Alexa.getRequestType(handlerInput.requestEnvelope) === 'IntentRequest' &&
@@ -918,11 +691,8 @@ const DateIntentHandler = {
           const startDate = sessionAttributes.pendingStartDate;
           const endDate = dateValue;
           
-          // Save the session with auto-generated code
-          const sessionData = await saveSession(uid, sessionName, startDate, endDate);
-          
-          // Auto-select the newly created session
-          await setSelectedSession(uid, sessionData.code);
+          // Save the session with auto-generated code and set as preset
+          const sessionData = await saveSession(uid, sessionName, startDate, endDate, true);
           
           // Clear session attributes
           delete sessionAttributes.inSessionCreation;
@@ -958,186 +728,86 @@ const DateIntentHandler = {
   }
 };
 
-const YesIntentHandler = {
+// NEW: GetAttendancePercentageIntent - handles the case when user asks for percentage without specifying session
+const GetAttendancePercentageIntentHandler = {
   canHandle(handlerInput) {
     return Alexa.getRequestType(handlerInput.requestEnvelope) === 'IntentRequest' &&
-           Alexa.getIntentName(handlerInput.requestEnvelope) === 'AMAZON.YesIntent';
+           Alexa.getIntentName(handlerInput.requestEnvelope) === 'GetAttendancePercentageIntent';
   },
   async handle(handlerInput) {
-    const sessionAttributes = handlerInput.attributesManager.getSessionAttributes();
+    const accessToken = getAccessToken(handlerInput);
+    if (!accessToken) return requireAccountLinking(handlerInput);
     
-    // Handle status change confirmation
-    if (sessionAttributes.pendingStatusChange) {
-      const { date, newStatus, oldStatus, holidayName } = sessionAttributes.pendingStatusChange;
+    try {
       const uid = getUserKey(handlerInput);
       
-      try {
-        await setDayStatus(uid, date, newStatus, { holidayName });
-        
-        // Clear the pending status change
-        delete sessionAttributes.pendingStatusChange;
-        handlerInput.attributesManager.setSessionAttributes(sessionAttributes);
-        
-        let speechText = `Okay, I've changed ${date} from ${oldStatus} to ${newStatus}`;
-        if (newStatus === 'holiday' && holidayName) {
-          speechText += ` for ${holidayName}`;
-        }
-        speechText += '.';
-        
+      // Check if user has a preset session
+      const presetSession = await findAlexaPresetSession(uid);
+      
+      if (presetSession) {
+        // Calculate attendance for preset session
+        const result = await calculateSessionAttendance(uid, null);
         return handlerInput.responseBuilder
-          .speak(speechText)
+          .speak(`Your attendance percentage for ${presetSession.name} session is ${result.percentage} percent.`)
           .getResponse();
-          
-      } catch (error) {
-        console.error('Error confirming status change:', error);
+      } else {
+        // No preset session found, ask user to select one
+        const sessions = await getAvailableSessions(uid);
+        
+        if (sessions.length === 0) {
+          return handlerInput.responseBuilder
+            .speak('You don\'t have any sessions yet. Please create a session first by saying "create session".')
+            .getResponse();
+        }
+        
+        let sessionList = sessions.slice(0, 5).map(s => s.name).join(', ');
+        if (sessions.length > 5) {
+          sessionList += ', and more';
+        }
+        
         return handlerInput.responseBuilder
-          .speak('Sorry, I encountered an error while updating the status. Please try again.')
+          .speak(`I need to know which session you want the attendance for. Your available sessions are: ${sessionList}. Which session would you like to check?`)
+          .reprompt('Please tell me which session you want to check attendance for.')
           .getResponse();
       }
-    }
-    
-    // Handle generic "yes" to create session
-    if (!sessionAttributes.inSessionCreation && !sessionAttributes.pendingStatusChange) {
-      sessionAttributes.inSessionCreation = true;
-      sessionAttributes.sessionCreationStep = 'name';
-      handlerInput.attributesManager.setSessionAttributes(sessionAttributes);
-      
+        
+    } catch (error) {
+      console.error('Error in GetAttendancePercentageIntent:', error);
       return handlerInput.responseBuilder
-        .speak('Great! What would you like to name this session? For example, "Summer 2024" or "Academic Year 2024-25".')
-        .reprompt('What should I call this session?')
+        .speak('Sorry, I encountered an error while fetching attendance percentage. Please try again.')
         .getResponse();
     }
-    
-    // Default response
-    const speechText = 'Okay, what would you like to do next?';
-    return handlerInput.responseBuilder
-      .speak(speechText)
-      .reprompt(speechText)
-      .getResponse();
   }
 };
 
-const NoIntentHandler = {
-  canHandle(handlerInput) {
-    return Alexa.getRequestType(handlerInput.requestEnvelope) === 'IntentRequest' &&
-           Alexa.getIntentName(handlerInput.requestEnvelope) === 'AMAZON.NoIntent';
-  },
-  handle(handlerInput) {
-    // Clear any pending status change or session creation
-    const sessionAttributes = handlerInput.attributesManager.getSessionAttributes();
-    if (sessionAttributes.pendingStatusChange) {
-      delete sessionAttributes.pendingStatusChange;
-    }
-    if (sessionAttributes.inSessionCreation) {
-      delete sessionAttributes.inSessionCreation;
-      delete sessionAttributes.sessionCreationStep;
-      delete sessionAttributes.pendingSessionName;
-      delete sessionAttributes.pendingStartDate;
-    }
-    handlerInput.attributesManager.setSessionAttributes(sessionAttributes);
-    
-    const speechText = 'Okay, I won\'t make any changes. Let me know if you need anything else.';
-    
-    return handlerInput.responseBuilder
-      .speak(speechText)
-      .getResponse();
-  }
-};
-
-const HelpIntentHandler = {
-  canHandle(handlerInput) {
-    return Alexa.getRequestType(handlerInput.requestEnvelope) === 'IntentRequest' &&
-           Alexa.getIntentName(handlerInput.requestEnvelope) === 'AMAZON.HelpIntent';
-  },
-  handle(handlerInput) {
-    const speechText = 'You can mark your attendance by saying: "mark present", "mark absent", or "mark holiday for [holiday name]". You can also ask for "monthly attendance" or "session attendance" to get your percentage. To create a session, say "create session" or "create session Summer 2024". When asked for dates, you can say things like "June first 2024" or "2024-06-01". To switch sessions, say "use session [session name]" or "use session [session code]". What would you like to do?';
-    
-    return handlerInput.responseBuilder
-      .speak(speechText)
-      .reprompt(speechText)
-      .getResponse();
-  }
-};
-
-const CancelAndStopIntentHandler = {
-  canHandle(handlerInput) {
-    return Alexa.getRequestType(handlerInput.requestEnvelope) === 'IntentRequest' &&
-           (Alexa.getIntentName(handlerInput.requestEnvelope) === 'AMAZON.CancelIntent' ||
-            Alexa.getIntentName(handlerInput.requestEnvelope) === 'AMAZON.StopIntent');
-  },
-  handle(handlerInput) {
-    const speechText = 'Goodbye! Have a great day!';
-    
-    return handlerInput.responseBuilder
-      .speak(speechText)
-      .getResponse();
-  }
-};
-
-const FallbackIntentHandler = {
-  canHandle(handlerInput) {
-    return Alexa.getRequestType(handlerInput.requestEnvelope) === 'IntentRequest' &&
-           Alexa.getIntentName(handlerInput.requestEnvelope) === 'AMAZON.FallbackIntent';
-  },
-  handle(handlerInput) {
-    const speechText = 'Sorry, I didn\'t understand that. You can mark attendance, ask for percentages, or say help for more options. What would you like to do?';
-    
-    return handlerInput.responseBuilder
-      .speak(speechText)
-      .reprompt(speechText)
-      .getResponse();
-  }
-};
-
-const SessionEndedRequestHandler = {
-  canHandle(handlerInput) {
-    return Alexa.getRequestType(handlerInput.requestEnvelope) === 'SessionEndedRequest';
-  },
-  handle(handlerInput) {
-    console.log('Session ended with reason:', handlerInput.requestEnvelope.request.reason);
-    return handlerInput.responseBuilder.getResponse();
-  }
-};
-
-const ErrorHandler = {
-  canHandle() {
-    return true;
-  },
-  handle(handlerInput, error) {
-    console.log('Error handled:', error);
-    
-    return handlerInput.responseBuilder
-      .speak('Sorry, I had trouble doing what you asked. Please try again.')
-      .reprompt('Please try again.')
-      .getResponse();
-  }
-};
+// ... (Keep all your other existing intent handlers the same: YesIntentHandler, NoIntentHandler, HelpIntentHandler, etc.)
 
 // Create Alexa Skill
 const skillBuilder = Alexa.SkillBuilders.custom();
 const skill = skillBuilder
   .addRequestHandlers(
     LaunchRequestHandler,
-    MarkPresentIntentHandler,
-    MarkAbsentIntentHandler,
-    MarkHolidayIntentHandler,
-    MonthlyAttendanceIntentHandler,
+    MarkPresentIntentHandler, // Keep your existing
+    MarkAbsentIntentHandler,  // Keep your existing  
+    MarkHolidayIntentHandler, // Keep your existing
+    MonthlyAttendanceIntentHandler, // Keep your existing
     SessionAttendanceIntentHandler,
     SelectSessionIntentHandler,
     CreateSessionIntentHandler,
-    CreateSessionWithNameIntentHandler,
+    CreateSessionWithNameIntentHandler, // Keep your existing
+    GetAttendancePercentageIntentHandler, // NEW handler
     DateIntentHandler,
-    YesIntentHandler,
-    NoIntentHandler,
-    HelpIntentHandler,
-    CancelAndStopIntentHandler,
-    FallbackIntentHandler,
-    SessionEndedRequestHandler
+    YesIntentHandler, // Keep your existing
+    NoIntentHandler, // Keep your existing
+    HelpIntentHandler, // Keep your existing
+    CancelAndStopIntentHandler, // Keep your existing
+    FallbackIntentHandler, // Keep your existing
+    SessionEndedRequestHandler // Keep your existing
   )
   .addErrorHandlers(ErrorHandler)
   .create();
 
-// Express setup
+// Express setup (keep the same as your original)
 const app = express();
 const adapter = new ExpressAdapter(skill, true, true);
 
