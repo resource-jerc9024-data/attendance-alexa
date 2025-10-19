@@ -822,9 +822,19 @@ app.use((req, res, next) => {
       const hasSig = Boolean(req.headers['signature']);
       const hasChain = Boolean(req.headers['signaturecertchainurl']);
       console.log('[alexa] incoming', req.method, req.url, 'len=', req.headers['content-length'], 'sig=', hasSig, 'chain=', hasChain);
+      const reqType = req.body && req.body.request && req.body.request.type;
+      if (reqType) console.log('[alexa] request.type =', reqType);
     }
   } catch (_) { /* ignore */ }
   next();
+});
+
+// Global error handler to capture adapter/handler errors
+app.use((err, req, res, next) => {
+  try {
+    console.error('[alexa] express error:', err && (err.stack || err.message || err));
+  } catch (_) { /* ignore */ }
+  try { res.status(500).send('Internal Server Error'); } catch (_) { /* ignore */ }
 });
 
 if (process.env.SKIP_ALEXA_VERIFICATION === '1') {
