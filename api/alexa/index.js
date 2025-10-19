@@ -815,6 +815,18 @@ app.use(async (req, res, next) => {
   }
 });
 
+// Diagnostics: confirm incoming Alexa signature headers and route
+app.use((req, res, next) => {
+  try {
+    if (req.method === 'POST') {
+      const hasSig = Boolean(req.headers['signature']);
+      const hasChain = Boolean(req.headers['signaturecertchainurl']);
+      console.log('[alexa] incoming', req.method, req.url, 'len=', req.headers['content-length'], 'sig=', hasSig, 'chain=', hasChain);
+    }
+  } catch (_) { /* ignore */ }
+  next();
+});
+
 if (process.env.SKIP_ALEXA_VERIFICATION === '1') {
   app.post('/', adapter.getRequestHandlers());
   // Catch-all POST to avoid 404s from minor path mismatches
