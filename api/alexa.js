@@ -566,6 +566,14 @@ app.use(async (req, res, next) => {
   next();
 });
 
+app.post('/test', (req, res) => {
+  console.log('Test endpoint hit', req.body);
+  res.json({ 
+    status: 'OK', 
+    message: 'Skill endpoint is working',
+    timestamp: new Date().toISOString()
+  });
+});
 // Alexa endpoint
 app.post('*', adapter.getRequestHandlers());
 
@@ -579,4 +587,5 @@ app.get('*', (req, res) => {
 });
 
 // Export for Vercel
+
 module.exports = app;
