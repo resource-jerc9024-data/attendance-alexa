@@ -479,10 +479,24 @@ async function inferSessionFromAttendance(uid) {
 const LaunchRequestHandler = {
   canHandle(h) { return Alexa.getRequestType(h.requestEnvelope) === 'LaunchRequest'; },
   handle(h) {
-    const token = getAccessToken(h);
-    if (!token) return requireAccountLinking(h);
-    const speak = 'Welcome. You can say: mark present, mark absent, mark holiday, monthly attendance, or session attendance.';
-    return h.responseBuilder.speak(speak).reprompt('What would you like to do?').getResponse();
+    console.log('[handler] LaunchRequest: entered');
+    try {
+      const token = getAccessToken(h);
+      console.log('[handler] LaunchRequest: hasAccessToken=', Boolean(token));
+      if (!token) {
+        console.log('[handler] LaunchRequest: prompting account linking');
+        const resp = requireAccountLinking(h);
+        console.log('[handler] LaunchRequest: response built (link card)');
+        return resp;
+      }
+      const speak = 'Welcome. You can say: mark present, mark absent, mark holiday, monthly attendance, or session attendance.';
+      const resp = h.responseBuilder.speak(speak).reprompt('What would you like to do?').getResponse();
+      console.log('[handler] LaunchRequest: response built (welcome)');
+      return resp;
+    } catch (e) {
+      console.error('[handler] LaunchRequest error:', e && (e.stack || e.message || e));
+      throw e;
+    }
   }
 };
 
@@ -777,7 +791,13 @@ const FallbackIntentHandler = {
 
 const SessionEndedRequestHandler = {
   canHandle(h) { return Alexa.getRequestType(h.requestEnvelope) === 'SessionEndedRequest'; },
-  handle(h) { return h.responseBuilder.getResponse(); }
+  handle(h) {
+    try {
+      const req = h && h.requestEnvelope && h.requestEnvelope.request;
+      console.log('[handler] SessionEndedRequest:', req && (req.reason || 'no-reason'));
+    } catch (_) { /* ignore */ }
+    return h.responseBuilder.getResponse();
+  }
 };
 
 /* --------------------------- Build Skill + Express ------------------------- */
