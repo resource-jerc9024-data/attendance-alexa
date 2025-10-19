@@ -795,8 +795,8 @@ const skill = Alexa.SkillBuilders.custom()
     }
   })
   .create();
-
-const adapter = new ExpressAdapter(skill, true, true);
+const skip = process.env.SKIP_ALEXA_VERIFICATION === '1';
+const adapter = new ExpressAdapter(skill, !skip, !skip);
 const app = express();
 
 // Raw body for signature verification (POST only)
@@ -826,6 +826,16 @@ app.use((req, res, next) => {
       if (reqType) console.log('[alexa] request.type =', reqType);
     }
   } catch (_) { /* ignore */ }
+  next();
+});
+
+// Log response status codes returned to Alexa
+app.use((req, res, next) => {
+  const origEnd = res.end;
+  res.end = function (chunk, encoding, cb) {
+    try { console.log('[alexa] response status=', res.statusCode); } catch (_) { /* ignore */ }
+    return origEnd.call(this, chunk, encoding, cb);
+  };
   next();
 });
 
