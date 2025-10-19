@@ -5,7 +5,7 @@ const { ExpressAdapter } = require('ask-sdk-express-adapter');
 const getRawBody = require('raw-body');
 
 // Initialize Firebase
-function initFirebase() {
+async function initFirebase() {
   if (admin.apps.length > 0) return;
   
   try {
@@ -21,11 +21,18 @@ function initFirebase() {
   }
 }
 
-// Initialize Firebase on startup
-try {
-  initFirebase();
-} catch (error) {
-  console.error('Initial Firebase init failed:', error);
+// Initialize Firebase on startup with proper async handling
+let firebaseInitialized = false;
+async function ensureFirebaseInitialized() {
+  if (!firebaseInitialized) {
+    try {
+      await initFirebase();
+      firebaseInitialized = true;
+    } catch (error) {
+      console.error('Initial Firebase init failed:', error);
+      throw error;
+    }
+  }
 }
 
 // Utility functions
@@ -76,7 +83,7 @@ function getYearMonthFromDate(dateStr = null) {
 
 // Firebase operations
 async function getAttendance(uid, date) {
-  initFirebase();
+  await ensureFirebaseInitialized();
   const db = admin.firestore();
   const [year, month] = date.split('-');
   const docRef = db.collection('attendance')
@@ -91,7 +98,7 @@ async function getAttendance(uid, date) {
 }
 
 async function setAttendance(uid, date, status, extraData = {}) {
-  initFirebase();
+  await ensureFirebaseInitialized();
   const db = admin.firestore();
   const [year, month] = date.split('-');
   const docRef = db.collection('attendance')
@@ -114,7 +121,7 @@ async function setAttendance(uid, date, status, extraData = {}) {
 
 // Attendance percentage calculation
 async function calculateMonthlyAttendance(uid, yearMonth) {
-  initFirebase();
+  await ensureFirebaseInitialized();
   const db = admin.firestore();
   const [year, month] = yearMonth.split('-');
   
@@ -147,7 +154,7 @@ async function calculateMonthlyAttendance(uid, yearMonth) {
 }
 
 async function calculateSessionAttendance(uid) {
-  initFirebase();
+  await ensureFirebaseInitialized();
   const db = admin.firestore();
   
   // Get current session (you can modify this logic based on your session structure)
@@ -183,7 +190,7 @@ async function calculateSessionAttendance(uid) {
 
 // Session management
 async function setSelectedSession(uid, sessionName) {
-  initFirebase();
+  await ensureFirebaseInitialized();
   const db = admin.firestore();
   const sessionRef = db.collection('sessions').doc(uid);
   
@@ -194,7 +201,7 @@ async function setSelectedSession(uid, sessionName) {
 }
 
 async function getSelectedSession(uid) {
-  initFirebase();
+  await ensureFirebaseInitialized();
   const db = admin.firestore();
   const sessionRef = db.collection('sessions').doc(uid);
   const doc = await sessionRef.get();
@@ -552,18 +559,24 @@ const skill = skillBuilder
 const app = express();
 const adapter = new ExpressAdapter(skill, true, true);
 
-// Middleware to parse raw body for Alexa verification
+// Fixed middleware with proper async handling
 app.use(async (req, res, next) => {
-  if (req.method === 'POST') {
+  if (req.method === 'POST' && req.headers['content-type'] === 'application/json') {
     try {
-      req.rawBody = await getRawBody(req);
+      req.rawBody = await getRawBody(req, {
+        length: req.headers['content-length'],
+        limit: '1mb',
+        encoding: 'utf8'
+      });
       req.body = JSON.parse(req.rawBody.toString());
+      next();
     } catch (error) {
       console.error('Error parsing body:', error);
-      return res.status(400).send('Bad Request');
+      return res.status(400).json({ error: 'Bad Request - Invalid JSON' });
     }
+  } else {
+    next();
   }
-  next();
 });
 
 // Alexa endpoint
@@ -579,6 +592,4 @@ app.get('*', (req, res) => {
 });
 
 // Export for Vercel
-
 module.exports = app;
-
