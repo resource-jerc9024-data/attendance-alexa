@@ -133,6 +133,19 @@ function formatAlexaDate(dateStr) {
   }
 }
 
+// Generate session code from session name
+function generateSessionCode(sessionName) {
+  // Create a simple code from the session name
+  const code = sessionName
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, '')
+    .substring(0, 8);
+  
+  // Add timestamp to make it unique
+  const timestamp = Date.now().toString(36);
+  return `${code}_${timestamp}`;
+}
+
 // Firebase operations - Updated for single document structure
 async function getUserData(uid) {
   await ensureFirebaseInitialized();
@@ -260,17 +273,39 @@ async function calculateMonthlyAttendance(uid, yearMonth) {
   return totalWorkingDays > 0 ? Math.round((presentDays / totalWorkingDays) * 100) : 0;
 }
 
-// Session attendance calculation
+// Session attendance calculation - Updated to use selected session
 async function calculateSessionAttendance(uid, sessionName = null) {
   const userData = await getUserData(uid);
   
-  // Get session data
+  // Get session data - first check selectedSession, then sessions array
   let startDate, endDate;
-  if (sessionName && userData.sessions) {
-    const session = userData.sessions.find(s => s.name === sessionName);
-    if (session) {
-      startDate = session.startDate;
-      endDate = session.endDate;
+  
+  if (sessionName) {
+    // Search for session by name in sessions array
+    if (userData.sessions) {
+      const session = userData.sessions.find(s => 
+        s.name.toLowerCase() === sessionName.toLowerCase() || 
+        s.code === sessionName
+      );
+      if (session) {
+        startDate = session.startDate;
+        endDate = session.endDate;
+      }
+    }
+  } else {
+    // Use selected session if no session name provided
+    if (userData.selectedSession) {
+      const selectedSession = userData.selectedSession;
+      if (userData.sessions) {
+        const session = userData.sessions.find(s => 
+          s.name.toLowerCase() === selectedSession.name.toLowerCase() || 
+          s.code === selectedSession.code
+        );
+        if (session) {
+          startDate = session.startDate;
+          endDate = session.endDate;
+        }
+      }
     }
   }
   
@@ -326,12 +361,35 @@ async function calculateSessionAttendance(uid, sessionName = null) {
   return totalWorkingDays > 0 ? Math.round((presentDays / totalWorkingDays) * 100) : 0;
 }
 
-// Session management
+// Session management - Updated to store selected session properly
 async function setSelectedSession(uid, sessionName) {
-  await updateUserData(uid, {
-    selectedSession: sessionName,
-    updatedAt: admin.firestore.FieldValue.serverTimestamp()
-  });
+  const userData = await getUserData(uid);
+  
+  // Search for session by name or code in sessions array
+  let selectedSession = null;
+  if (userData.sessions) {
+    selectedSession = userData.sessions.find(s => 
+      s.name.toLowerCase() === sessionName.toLowerCase() || 
+      s.code === sessionName
+    );
+  }
+  
+  if (selectedSession) {
+    // Store selected session with both name and code for linking
+    await updateUserData(uid, {
+      selectedSession: {
+        name: selectedSession.name,
+        code: selectedSession.code,
+        startDate: selectedSession.startDate,
+        endDate: selectedSession.endDate,
+        selectedAt: new Date().toISOString()
+      },
+      updatedAt: admin.firestore.FieldValue.serverTimestamp()
+    });
+    return { success: true, session: selectedSession };
+  } else {
+    return { success: false, error: 'Session not found' };
+  }
 }
 
 async function getSelectedSession(uid) {
@@ -339,18 +397,27 @@ async function getSelectedSession(uid) {
   return userData.selectedSession || null;
 }
 
+// Save session with auto-generated code
 async function saveSession(uid, sessionName, startDate, endDate) {
   const userData = await getUserData(uid);
   const sessions = userData.sessions || [];
   
-  // Check if session already exists
-  const existingIndex = sessions.findIndex(s => s.name === sessionName);
+  // Generate session code
+  const sessionCode = generateSessionCode(sessionName);
+  
   const sessionData = {
     name: sessionName,
+    code: sessionCode,
     startDate,
     endDate,
     createdAt: new Date().toISOString()
   };
+  
+  // Check if session already exists by name or code
+  const existingIndex = sessions.findIndex(s => 
+    s.name.toLowerCase() === sessionName.toLowerCase() || 
+    s.code === sessionCode
+  );
   
   if (existingIndex !== -1) {
     sessions[existingIndex] = sessionData;
@@ -362,6 +429,14 @@ async function saveSession(uid, sessionName, startDate, endDate) {
   sessions.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
   
   await updateUserData(uid, { sessions });
+  
+  return sessionData;
+}
+
+// Get available sessions for user
+async function getAvailableSessions(uid) {
+  const userData = await getUserData(uid);
+  return userData.sessions || [];
 }
 
 // Intent Handlers
@@ -610,11 +685,14 @@ const SessionAttendanceIntentHandler = {
     try {
       const uid = getUserKey(handlerInput);
       
-      // Get selected session or use default
+      // Get selected session info
       const selectedSession = await getSelectedSession(uid);
-      const percentage = await calculateSessionAttendance(uid, selectedSession);
+      const percentage = await calculateSessionAttendance(uid);
       
-      const sessionText = selectedSession ? `for ${selectedSession} session` : 'for the current session';
+      let sessionText = 'for the current session';
+      if (selectedSession) {
+        sessionText = `for ${selectedSession.name} session`;
+      }
       
       return handlerInput.responseBuilder
         .speak(`Your session attendance ${sessionText} is ${percentage} percent.`)
@@ -629,6 +707,7 @@ const SessionAttendanceIntentHandler = {
   }
 };
 
+// Updated SelectSessionIntentHandler with session search and linking
 const SelectSessionIntentHandler = {
   canHandle(handlerInput) {
     return Alexa.getRequestType(handlerInput.requestEnvelope) === 'IntentRequest' &&
@@ -641,19 +720,62 @@ const SelectSessionIntentHandler = {
     const sessionName = Alexa.getSlotValue(handlerInput.requestEnvelope, 'sessionName');
     
     if (!sessionName) {
-      return handlerInput.responseBuilder
-        .speak('Please specify which session you want to use. For example, say "use session summer 2024".')
-        .reprompt('Which session would you like to use?')
-        .getResponse();
+      // List available sessions
+      try {
+        const uid = getUserKey(handlerInput);
+        const sessions = await getAvailableSessions(uid);
+        
+        if (sessions.length === 0) {
+          return handlerInput.responseBuilder
+            .speak('You don\'t have any sessions yet. Please create a session first by saying "create session".')
+            .getResponse();
+        }
+        
+        let sessionList = sessions.slice(0, 5).map(s => s.name).join(', ');
+        if (sessions.length > 5) {
+          sessionList += ', and more';
+        }
+        
+        return handlerInput.responseBuilder
+          .speak(`Your available sessions are: ${sessionList}. Which session would you like to use?`)
+          .reprompt('Please tell me which session you want to use.')
+          .getResponse();
+          
+      } catch (error) {
+        console.error('Error listing sessions:', error);
+        return handlerInput.responseBuilder
+          .speak('Sorry, I encountered an error while fetching your sessions. Please try again.')
+          .getResponse();
+      }
     }
     
     try {
       const uid = getUserKey(handlerInput);
-      await setSelectedSession(uid, sessionName);
+      const result = await setSelectedSession(uid, sessionName);
       
-      return handlerInput.responseBuilder
-        .speak(`Okay, I've set ${sessionName} as your current session.`)
-        .getResponse();
+      if (result.success) {
+        return handlerInput.responseBuilder
+          .speak(`Okay, I've set ${result.session.name} as your current session.`)
+          .getResponse();
+      } else {
+        // Session not found, show available sessions
+        const sessions = await getAvailableSessions(uid);
+        if (sessions.length === 0) {
+          return handlerInput.responseBuilder
+            .speak(`Session "${sessionName}" not found. You don't have any sessions yet. Please create a session first by saying "create session".`)
+            .getResponse();
+        }
+        
+        let sessionList = sessions.slice(0, 5).map(s => s.name).join(', ');
+        if (sessions.length > 5) {
+          sessionList += ', and more';
+        }
+        
+        return handlerInput.responseBuilder
+          .speak(`Session "${sessionName}" not found. Your available sessions are: ${sessionList}. Which session would you like to use?`)
+          .reprompt('Please tell me which session you want to use.')
+          .getResponse();
+      }
         
     } catch (error) {
       console.error('Error in SelectSessionIntent:', error);
@@ -728,7 +850,7 @@ const CreateSessionWithNameIntentHandler = {
   }
 };
 
-// Updated DateIntentHandler (formerly DateInputIntentHandler)
+// Updated DateIntentHandler for session creation
 const DateIntentHandler = {
   canHandle(handlerInput) {
     return Alexa.getRequestType(handlerInput.requestEnvelope) === 'IntentRequest' &&
@@ -765,6 +887,12 @@ const DateIntentHandler = {
           const startDate = sessionAttributes.pendingStartDate;
           const endDate = dateValue;
           
+          // Save the session with auto-generated code
+          const sessionData = await saveSession(uid, sessionName, startDate, endDate);
+          
+          // Auto-select the newly created session
+          await setSelectedSession(uid, sessionData.name);
+          
           // Clear session attributes
           delete sessionAttributes.inSessionCreation;
           delete sessionAttributes.sessionCreationStep;
@@ -772,11 +900,8 @@ const DateIntentHandler = {
           delete sessionAttributes.pendingStartDate;
           handlerInput.attributesManager.setSessionAttributes(sessionAttributes);
           
-          // Save the session
-          await saveSession(uid, sessionName, startDate, endDate);
-          
           return handlerInput.responseBuilder
-            .speak(`Successfully created session "${sessionName}" from ${formatAlexaDate(startDate)} to ${formatAlexaDate(endDate)}.`)
+            .speak(`Successfully created session "${sessionData.name}" from ${formatAlexaDate(startDate)} to ${formatAlexaDate(endDate)}. I've also set it as your current session.`)
             .getResponse();
         } else {
           return handlerInput.responseBuilder
@@ -894,7 +1019,7 @@ const HelpIntentHandler = {
            Alexa.getIntentName(handlerInput.requestEnvelope) === 'AMAZON.HelpIntent';
   },
   handle(handlerInput) {
-    const speechText = 'You can mark your attendance by saying: "mark present", "mark absent", or "mark holiday for [holiday name]". You can also ask for "monthly attendance" or "session attendance" to get your percentage. To create a session, say "create session" or "create session Summer 2024". When asked for dates, you can say things like "June first 2024" or "2024-06-01". What would you like to do?';
+    const speechText = 'You can mark your attendance by saying: "mark present", "mark absent", or "mark holiday for [holiday name]". You can also ask for "monthly attendance" or "session attendance" to get your percentage. To create a session, say "create session" or "create session Summer 2024". When asked for dates, you can say things like "June first 2024" or "2024-06-01". To switch sessions, say "use session [session name]". What would you like to do?';
     
     return handlerInput.responseBuilder
       .speak(speechText)
@@ -970,7 +1095,7 @@ const skill = skillBuilder
     SelectSessionIntentHandler,
     CreateSessionIntentHandler,
     CreateSessionWithNameIntentHandler,
-    DateIntentHandler, // Updated from DateInputIntentHandler to DateIntentHandler
+    DateIntentHandler,
     YesIntentHandler,
     NoIntentHandler,
     HelpIntentHandler,
