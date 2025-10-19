@@ -18,6 +18,10 @@ function initFirebase() {
   const jsonRaw = sanitize(process.env.FIREBASE_SA_JSON || '');
 
   const projectIdEnv = sanitize(process.env.FIREBASE_PROJECT_ID || '');
+  try {
+    const src = b64Raw ? 'B64' : (jsonRaw ? 'JSON' : 'NONE');
+    console.log('[initFirebase] start: credsSource=', src, 'projEnvSet=', Boolean(projectIdEnv));
+  } catch (_) { /* ignore logging errors */ }
 
   let saObj = null;
 
@@ -33,11 +37,16 @@ function initFirebase() {
     saObj = tryParseJSON(jsonRaw);
   }
   if (!saObj) {
+    console.error('[initFirebase] no service account parsed');
     throw new Error('Unable to read Firebase service account. Set FIREBASE_SA_B64 (base64 of JSON) or FIREBASE_SA_JSON (raw JSON).');
   }
 
   const projectId = projectIdEnv || saObj.project_id;
+  try {
+    console.log('[initFirebase] resolved projectId=', projectId ? 'present' : 'missing', 'hasClientEmail=', Boolean(saObj.client_email));
+  } catch (_) { /* ignore */ }
   if (!projectId) {
+    console.error('[initFirebase] projectId missing');
     throw new Error('Missing FIREBASE_PROJECT_ID and service account has no project_id.');
   }
 
@@ -47,9 +56,14 @@ function initFirebase() {
       projectId
     });
   } catch (e) {
-    console.error('Firebase initializeApp failed:', e);
+    try {
+      console.error('Firebase initializeApp failed:', e && (e.message || e.name || e));
+    } catch (_) {
+      console.error('Firebase initializeApp failed: <unprintable error>');
+    }
     throw e;
   }
+  try { console.log('[initFirebase] success'); } catch (_) { /* ignore */ }
 }
 
 /* ------------------------- Auth/Session helpers (safe) ------------------------- */
