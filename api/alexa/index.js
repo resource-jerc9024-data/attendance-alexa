@@ -4,6 +4,16 @@ const express = require('express');
 const { ExpressAdapter } = require('ask-sdk-express-adapter');
 const getRawBody = require('raw-body');
 
+// Global process-level diagnostics
+try {
+  process.on('unhandledRejection', (e) => {
+    try { console.error('[process] unhandledRejection:', e && (e.stack || e.message || e)); } catch (_) {}
+  });
+  process.on('uncaughtException', (e) => {
+    try { console.error('[process] uncaughtException:', e && (e.stack || e.message || e)); } catch (_) {}
+  });
+} catch (_) { /* ignore */ }
+
 /* ---------------------- Firebase initialization (robust) ---------------------- */
 function initFirebase() {
   if (admin.apps.length) return;
@@ -822,8 +832,13 @@ app.use((req, res, next) => {
       const hasSig = Boolean(req.headers['signature']);
       const hasChain = Boolean(req.headers['signaturecertchainurl']);
       console.log('[alexa] incoming', req.method, req.url, 'len=', req.headers['content-length'], 'sig=', hasSig, 'chain=', hasChain);
+      if (hasChain) {
+        try { console.log('[alexa] cert url=', String(req.headers['signaturecertchainurl'])); } catch (_) {}
+      }
       const reqType = req.body && req.body.request && req.body.request.type;
       if (reqType) console.log('[alexa] request.type =', reqType);
+      const intentName = req.body && req.body.request && req.body.request.intent && req.body.request.intent.name;
+      if (intentName) console.log('[alexa] intent.name =', intentName);
     }
   } catch (_) { /* ignore */ }
   next();
