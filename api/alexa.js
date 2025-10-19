@@ -281,7 +281,7 @@ async function calculateSessionAttendance(uid, sessionName = null) {
   let startDate, endDate;
   
   if (sessionName) {
-    // Search for session by name in sessions array
+    // Search for session by name or code in sessions array
     if (userData.sessions) {
       const session = userData.sessions.find(s => 
         s.name.toLowerCase() === sessionName.toLowerCase() || 
@@ -361,17 +361,22 @@ async function calculateSessionAttendance(uid, sessionName = null) {
   return totalWorkingDays > 0 ? Math.round((presentDays / totalWorkingDays) * 100) : 0;
 }
 
-// Session management - Updated to store selected session properly
-async function setSelectedSession(uid, sessionName) {
+// Enhanced setSelectedSession to handle codes better
+async function setSelectedSession(uid, sessionIdentifier) {
   const userData = await getUserData(uid);
   
-  // Search for session by name or code in sessions array
+  // Search for session by code first (most specific), then by name
   let selectedSession = null;
   if (userData.sessions) {
-    selectedSession = userData.sessions.find(s => 
-      s.name.toLowerCase() === sessionName.toLowerCase() || 
-      s.code === sessionName
-    );
+    // First try exact code match
+    selectedSession = userData.sessions.find(s => s.code === sessionIdentifier);
+    
+    // If no code match, try name match
+    if (!selectedSession) {
+      selectedSession = userData.sessions.find(s => 
+        s.name.toLowerCase() === sessionIdentifier.toLowerCase()
+      );
+    }
   }
   
   if (selectedSession) {
@@ -707,7 +712,7 @@ const SessionAttendanceIntentHandler = {
   }
 };
 
-// Updated SelectSessionIntentHandler with session search and linking
+// Enhanced SelectSessionIntentHandler with better duplicate handling
 const SelectSessionIntentHandler = {
   canHandle(handlerInput) {
     return Alexa.getRequestType(handlerInput.requestEnvelope) === 'IntentRequest' &&
@@ -751,15 +756,41 @@ const SelectSessionIntentHandler = {
     
     try {
       const uid = getUserKey(handlerInput);
-      const result = await setSelectedSession(uid, sessionName);
+      const sessions = await getAvailableSessions(uid);
       
-      if (result.success) {
+      // First, try exact code match (most specific)
+      const exactCodeMatch = sessions.find(s => s.code === sessionName);
+      if (exactCodeMatch) {
+        await setSelectedSession(uid, exactCodeMatch.code);
         return handlerInput.responseBuilder
-          .speak(`Okay, I've set ${result.session.name} as your current session.`)
+          .speak(`Okay, I've set ${exactCodeMatch.name} as your current session.`)
+          .getResponse();
+      }
+      
+      // Then, try name match
+      const nameMatches = sessions.filter(s => 
+        s.name.toLowerCase() === sessionName.toLowerCase()
+      );
+      
+      if (nameMatches.length === 1) {
+        // Single match found
+        await setSelectedSession(uid, nameMatches[0].code);
+        return handlerInput.responseBuilder
+          .speak(`Okay, I've set ${nameMatches[0].name} as your current session.`)
+          .getResponse();
+      } else if (nameMatches.length > 1) {
+        // Multiple sessions with same name
+        const sessionCodes = nameMatches.map(s => s.code).join(', ');
+        const dateRanges = nameMatches.map(s => 
+          `${formatAlexaDate(s.startDate)} to ${formatAlexaDate(s.endDate)}`
+        ).join(' and ');
+        
+        return handlerInput.responseBuilder
+          .speak(`I found ${nameMatches.length} sessions named "${sessionName}" with date ranges: ${dateRanges}. Please specify which one by using the session code: ${sessionCodes}`)
+          .reprompt('Please tell me the session code to select the correct session.')
           .getResponse();
       } else {
-        // Session not found, show available sessions
-        const sessions = await getAvailableSessions(uid);
+        // No matches found, show available sessions
         if (sessions.length === 0) {
           return handlerInput.responseBuilder
             .speak(`Session "${sessionName}" not found. You don't have any sessions yet. Please create a session first by saying "create session".`)
@@ -891,7 +922,7 @@ const DateIntentHandler = {
           const sessionData = await saveSession(uid, sessionName, startDate, endDate);
           
           // Auto-select the newly created session
-          await setSelectedSession(uid, sessionData.name);
+          await setSelectedSession(uid, sessionData.code);
           
           // Clear session attributes
           delete sessionAttributes.inSessionCreation;
@@ -1019,7 +1050,7 @@ const HelpIntentHandler = {
            Alexa.getIntentName(handlerInput.requestEnvelope) === 'AMAZON.HelpIntent';
   },
   handle(handlerInput) {
-    const speechText = 'You can mark your attendance by saying: "mark present", "mark absent", or "mark holiday for [holiday name]". You can also ask for "monthly attendance" or "session attendance" to get your percentage. To create a session, say "create session" or "create session Summer 2024". When asked for dates, you can say things like "June first 2024" or "2024-06-01". To switch sessions, say "use session [session name]". What would you like to do?';
+    const speechText = 'You can mark your attendance by saying: "mark present", "mark absent", or "mark holiday for [holiday name]". You can also ask for "monthly attendance" or "session attendance" to get your percentage. To create a session, say "create session" or "create session Summer 2024". When asked for dates, you can say things like "June first 2024" or "2024-06-01". To switch sessions, say "use session [session name]" or "use session [session code]". What would you like to do?';
     
     return handlerInput.responseBuilder
       .speak(speechText)
