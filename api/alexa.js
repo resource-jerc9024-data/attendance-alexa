@@ -119,6 +119,20 @@ function getYearMonthFromDate(dateStr = null) {
   return `${year}-${month}`;
 }
 
+// Helper function to format Alexa date for speech
+function formatAlexaDate(dateStr) {
+  try {
+    const date = new Date(dateStr);
+    return date.toLocaleDateString('en-US', { 
+      year: 'numeric', 
+      month: 'long', 
+      day: 'numeric' 
+    });
+  } catch (error) {
+    return dateStr; // Fallback to original string
+  }
+}
+
 // Firebase operations - Updated for single document structure
 async function getUserData(uid) {
   await ensureFirebaseInitialized();
@@ -659,31 +673,113 @@ const CreateSessionIntentHandler = {
     const accessToken = getAccessToken(handlerInput);
     if (!accessToken) return requireAccountLinking(handlerInput);
     
-    const sessionName = Alexa.getSlotValue(handlerInput.requestEnvelope, 'sessionName');
-    const startDate = Alexa.getSlotValue(handlerInput.requestEnvelope, 'startDate');
-    const endDate = Alexa.getSlotValue(handlerInput.requestEnvelope, 'endDate');
+    // Start session creation flow
+    const sessionAttributes = handlerInput.attributesManager.getSessionAttributes();
+    sessionAttributes.inSessionCreation = true;
+    sessionAttributes.sessionCreationStep = 'name';
+    handlerInput.attributesManager.setSessionAttributes(sessionAttributes);
     
-    if (!sessionName || !startDate || !endDate) {
+    return handlerInput.responseBuilder
+      .speak('Okay, let\'s create a new session. What would you like to name this session? For example, "Summer 2024" or "Academic Year 2024-25".')
+      .reprompt('What should I call this session?')
+      .getResponse();
+  }
+};
+
+const CreateSessionWithNameIntentHandler = {
+  canHandle(handlerInput) {
+    return Alexa.getRequestType(handlerInput.requestEnvelope) === 'IntentRequest' &&
+           Alexa.getIntentName(handlerInput.requestEnvelope) === 'CreateSessionWithNameIntent';
+  },
+  async handle(handlerInput) {
+    const accessToken = getAccessToken(handlerInput);
+    if (!accessToken) return requireAccountLinking(handlerInput);
+    
+    const sessionName = Alexa.getSlotValue(handlerInput.requestEnvelope, 'sessionName');
+    
+    if (!sessionName) {
       return handlerInput.responseBuilder
-        .speak('Please provide a session name, start date, and end date. For example, say "create session summer 2024 from June first to August thirty first".')
-        .reprompt('Please provide the session name, start date, and end date.')
+        .speak('Please provide a session name. For example, say "create session called Summer 2024".')
+        .reprompt('What would you like to name this session?')
         .getResponse();
     }
     
     try {
       const uid = getUserKey(handlerInput);
-      await saveSession(uid, sessionName, startDate, endDate);
+      
+      // Store the session name in session attributes for follow-up
+      const sessionAttributes = handlerInput.attributesManager.getSessionAttributes();
+      sessionAttributes.inSessionCreation = true;
+      sessionAttributes.sessionCreationStep = 'startDate';
+      sessionAttributes.pendingSessionName = sessionName;
+      handlerInput.attributesManager.setSessionAttributes(sessionAttributes);
       
       return handlerInput.responseBuilder
-        .speak(`Successfully created session ${sessionName} from ${startDate} to ${endDate}.`)
+        .speak(`Okay, I'll create session "${sessionName}". When does this session start? Please provide a start date like "June 1st 2024" or "2024-06-01".`)
+        .reprompt('Please tell me the start date for this session.')
         .getResponse();
         
     } catch (error) {
-      console.error('Error in CreateSessionIntent:', error);
+      console.error('Error in CreateSessionWithNameIntent:', error);
       return handlerInput.responseBuilder
         .speak('Sorry, I encountered an error while creating the session. Please try again.')
         .getResponse();
     }
+  }
+};
+
+// Enhanced handler for date inputs and session creation flow
+const DateInputIntentHandler = {
+  canHandle(handlerInput) {
+    return Alexa.getRequestType(handlerInput.requestEnvelope) === 'IntentRequest' &&
+           Alexa.getIntentName(handlerInput.requestEnvelope) === 'AMAZON.Date';
+  },
+  async handle(handlerInput) {
+    const sessionAttributes = handlerInput.attributesManager.getSessionAttributes();
+    const uid = getUserKey(handlerInput);
+    
+    // Handle session creation flow
+    if (sessionAttributes.inSessionCreation) {
+      const dateValue = Alexa.getSlotValue(handlerInput.requestEnvelope, 'date');
+      
+      if (sessionAttributes.sessionCreationStep === 'startDate') {
+        if (dateValue) {
+          sessionAttributes.pendingStartDate = dateValue;
+          sessionAttributes.sessionCreationStep = 'endDate';
+          handlerInput.attributesManager.setSessionAttributes(sessionAttributes);
+          
+          return handlerInput.responseBuilder
+            .speak(`Okay, starting on ${formatAlexaDate(dateValue)}. When does the session end?`)
+            .reprompt('Please provide an end date for the session.')
+            .getResponse();
+        }
+      } 
+      else if (sessionAttributes.sessionCreationStep === 'endDate') {
+        if (dateValue) {
+          const sessionName = sessionAttributes.pendingSessionName;
+          const startDate = sessionAttributes.pendingStartDate;
+          const endDate = dateValue;
+          
+          // Clear session attributes
+          delete sessionAttributes.inSessionCreation;
+          delete sessionAttributes.sessionCreationStep;
+          delete sessionAttributes.pendingSessionName;
+          delete sessionAttributes.pendingStartDate;
+          handlerInput.attributesManager.setSessionAttributes(sessionAttributes);
+          
+          // Save the session
+          await saveSession(uid, sessionName, startDate, endDate);
+          
+          return handlerInput.responseBuilder
+            .speak(`Successfully created session "${sessionName}" from ${formatAlexaDate(startDate)} to ${formatAlexaDate(endDate)}.`)
+            .getResponse();
+        }
+      }
+    }
+    
+    return handlerInput.responseBuilder
+      .speak('I\'m not sure what date you\'re referring to. Please try creating a session again.')
+      .getResponse();
   }
 };
 
@@ -725,9 +821,20 @@ const YesIntentHandler = {
       }
     }
     
+    // Handle generic "yes" to create session
+    if (!sessionAttributes.inSessionCreation && !sessionAttributes.pendingStatusChange) {
+      sessionAttributes.inSessionCreation = true;
+      sessionAttributes.sessionCreationStep = 'name';
+      handlerInput.attributesManager.setSessionAttributes(sessionAttributes);
+      
+      return handlerInput.responseBuilder
+        .speak('Great! What would you like to name this session? For example, "Summer 2024" or "Academic Year 2024-25".')
+        .reprompt('What should I call this session?')
+        .getResponse();
+    }
+    
     // Default response
     const speechText = 'Okay, what would you like to do next?';
-    
     return handlerInput.responseBuilder
       .speak(speechText)
       .reprompt(speechText)
@@ -741,12 +848,18 @@ const NoIntentHandler = {
            Alexa.getIntentName(handlerInput.requestEnvelope) === 'AMAZON.NoIntent';
   },
   handle(handlerInput) {
-    // Clear any pending status change
+    // Clear any pending status change or session creation
     const sessionAttributes = handlerInput.attributesManager.getSessionAttributes();
     if (sessionAttributes.pendingStatusChange) {
       delete sessionAttributes.pendingStatusChange;
-      handlerInput.attributesManager.setSessionAttributes(sessionAttributes);
     }
+    if (sessionAttributes.inSessionCreation) {
+      delete sessionAttributes.inSessionCreation;
+      delete sessionAttributes.sessionCreationStep;
+      delete sessionAttributes.pendingSessionName;
+      delete sessionAttributes.pendingStartDate;
+    }
+    handlerInput.attributesManager.setSessionAttributes(sessionAttributes);
     
     const speechText = 'Okay, I won\'t make any changes. Let me know if you need anything else.';
     
@@ -762,7 +875,7 @@ const HelpIntentHandler = {
            Alexa.getIntentName(handlerInput.requestEnvelope) === 'AMAZON.HelpIntent';
   },
   handle(handlerInput) {
-    const speechText = 'You can mark your attendance by saying: "mark present", "mark absent", or "mark holiday for [holiday name]". You can also ask for "monthly attendance" or "session attendance" to get your percentage. What would you like to do?';
+    const speechText = 'You can mark your attendance by saying: "mark present", "mark absent", or "mark holiday for [holiday name]". You can also ask for "monthly attendance" or "session attendance" to get your percentage. To create a session, say "create session" or "create session Summer 2024". What would you like to do?';
     
     return handlerInput.responseBuilder
       .speak(speechText)
@@ -837,6 +950,8 @@ const skill = skillBuilder
     SessionAttendanceIntentHandler,
     SelectSessionIntentHandler,
     CreateSessionIntentHandler,
+    CreateSessionWithNameIntentHandler,
+    DateInputIntentHandler,
     YesIntentHandler,
     NoIntentHandler,
     HelpIntentHandler,
