@@ -958,7 +958,6 @@ const ErrorHandler = {
 };
 
 // Create Alexa Skill
-const skillBuilder = Alexa.SkillBuilders.custom();
 const skill = skillBuilder
   .addRequestHandlers(
     LaunchRequestHandler,
@@ -970,7 +969,7 @@ const skill = skillBuilder
     SelectSessionIntentHandler,
     CreateSessionIntentHandler,
     CreateSessionWithNameIntentHandler,
-    DateInputIntentHandler,
+    DateInputIntentHandler, // Make sure this line is present
     YesIntentHandler,
     NoIntentHandler,
     HelpIntentHandler,
@@ -1019,4 +1018,5 @@ app.get('*', (req, res) => {
 
 // Export for Vercel
 module.exports = app;
+
 
