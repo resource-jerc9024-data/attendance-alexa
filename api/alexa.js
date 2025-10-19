@@ -732,7 +732,7 @@ const CreateSessionWithNameIntentHandler = {
 const DateInputIntentHandler = {
   canHandle(handlerInput) {
     return Alexa.getRequestType(handlerInput.requestEnvelope) === 'IntentRequest' &&
-           Alexa.getIntentName(handlerInput.requestEnvelope) === 'AMAZON.Date';
+           Alexa.getIntentName(handlerInput.requestEnvelope) === 'DateInputIntent';
   },
   async handle(handlerInput) {
     const sessionAttributes = handlerInput.attributesManager.getSessionAttributes();
@@ -751,6 +751,11 @@ const DateInputIntentHandler = {
           return handlerInput.responseBuilder
             .speak(`Okay, starting on ${formatAlexaDate(dateValue)}. When does the session end?`)
             .reprompt('Please provide an end date for the session.')
+            .getResponse();
+        } else {
+          return handlerInput.responseBuilder
+            .speak('I didn\'t catch the start date. Please provide a start date like "June 1st 2024" or "2024-06-01".')
+            .reprompt('When does the session start?')
             .getResponse();
         }
       } 
@@ -773,12 +778,26 @@ const DateInputIntentHandler = {
           return handlerInput.responseBuilder
             .speak(`Successfully created session "${sessionName}" from ${formatAlexaDate(startDate)} to ${formatAlexaDate(endDate)}.`)
             .getResponse();
+        } else {
+          return handlerInput.responseBuilder
+            .speak('I didn\'t catch the end date. Please provide an end date like "August 31st 2024" or "2024-08-31".')
+            .reprompt('When does the session end?')
+            .getResponse();
         }
       }
     }
     
+    // If not in session creation, handle as generic date input
+    const dateValue = Alexa.getSlotValue(handlerInput.requestEnvelope, 'date');
+    if (dateValue) {
+      return handlerInput.responseBuilder
+        .speak(`You said the date is ${formatAlexaDate(dateValue)}. What would you like to do with this date?`)
+        .reprompt('What would you like to do with this date?')
+        .getResponse();
+    }
+    
     return handlerInput.responseBuilder
-      .speak('I\'m not sure what date you\'re referring to. Please try creating a session again.')
+      .speak('I\'m not sure what date you\'re referring to. Please try again.')
       .getResponse();
   }
 };
@@ -1000,3 +1019,4 @@ app.get('*', (req, res) => {
 
 // Export for Vercel
 module.exports = app;
+
