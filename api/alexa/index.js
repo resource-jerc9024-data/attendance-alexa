@@ -782,6 +782,16 @@ const SessionEndedRequestHandler = {
 
 /* --------------------------- Build Skill + Express ------------------------- */
 const skill = Alexa.SkillBuilders.custom()
+  .addRequestInterceptors({
+    process(handlerInput) {
+      try {
+        const env = handlerInput && handlerInput.requestEnvelope;
+        const t = env && env.request && env.request.type;
+        const intent = env && env.request && env.request.intent && env.request.intent.name;
+        console.log('[ask-sdk] request.type=', t || 'n/a', 'intent=', intent || 'n/a');
+      } catch (_) { /* ignore */ }
+    }
+  })
   .addRequestHandlers(
     LaunchRequestHandler,
     MarkPresentIntentHandler,
@@ -797,6 +807,15 @@ const skill = Alexa.SkillBuilders.custom()
     FallbackIntentHandler,
     SessionEndedRequestHandler
   )
+  .addResponseInterceptors({
+    process(handlerInput, response) {
+      try {
+        // Log minimal shape to avoid huge blobs
+        const spoken = response && response.outputSpeech && (response.outputSpeech.text || response.outputSpeech.ssml);
+        console.log('[ask-sdk] response prepared, hasOutputSpeech=', Boolean(spoken), 'shouldEndSession=', response && response.shouldEndSession);
+      } catch (_) { /* ignore */ }
+    }
+  })
   .addErrorHandlers({
     canHandle() { return true; },
     handle(h, error) {
