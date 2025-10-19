@@ -9,7 +9,39 @@ async function initFirebase() {
   if (admin.apps.length > 0) return;
   
   try {
-    const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+    let serviceAccount;
+
+    // Method 1: Base64 encoded service account (FIREBASE_SA_B64)
+    if (process.env.FIREBASE_SA_B64) {
+      console.log('Using FIREBASE_SA_B64 for Firebase initialization');
+      const serviceAccountJson = Buffer.from(process.env.FIREBASE_SA_B64, 'base64').toString('utf8');
+      serviceAccount = JSON.parse(serviceAccountJson);
+    }
+    // Method 2: Individual environment variables
+    else if (process.env.FIREBASE_PRIVATE_KEY) {
+      console.log('Using individual env vars for Firebase initialization');
+      serviceAccount = {
+        type: "service_account",
+        project_id: process.env.FIREBASE_PROJECT_ID,
+        private_key_id: process.env.FIREBASE_PRIVATE_KEY_ID,
+        private_key: process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n'),
+        client_email: process.env.FIREBASE_CLIENT_EMAIL,
+        client_id: process.env.FIREBASE_CLIENT_ID,
+        auth_uri: "https://accounts.google.com/o/oauth2/auth",
+        token_uri: "https://oauth2.googleapis.com/token",
+        auth_provider_x509_cert_url: "https://www.googleapis.com/oauth2/v1/certs",
+        client_x509_cert_url: process.env.FIREBASE_CLIENT_X509_CERT_URL
+      };
+    }
+    // Method 3: JSON string (legacy)
+    else if (process.env.FIREBASE_SERVICE_ACCOUNT) {
+      console.log('Using FIREBASE_SERVICE_ACCOUNT JSON for Firebase initialization');
+      serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+    }
+    else {
+      throw new Error('No Firebase service account configuration found in environment variables. Please set FIREBASE_SA_B64, FIREBASE_SERVICE_ACCOUNT, or individual Firebase env vars.');
+    }
+
     admin.initializeApp({
       credential: admin.credential.cert(serviceAccount),
       projectId: process.env.FIREBASE_PROJECT_ID
@@ -17,6 +49,12 @@ async function initFirebase() {
     console.log('Firebase initialized successfully');
   } catch (error) {
     console.error('Firebase initialization failed:', error);
+    console.error('Available env vars:', {
+      FIREBASE_SA_B64: process.env.FIREBASE_SA_B64 ? `Set (${process.env.FIREBASE_SA_B64.length} chars)` : 'Not set',
+      FIREBASE_SERVICE_ACCOUNT: process.env.FIREBASE_SERVICE_ACCOUNT ? `Set (${process.env.FIREBASE_SERVICE_ACCOUNT.length} chars)` : 'Not set',
+      FIREBASE_PROJECT_ID: process.env.FIREBASE_PROJECT_ID || 'Not set',
+      FIREBASE_PRIVATE_KEY: process.env.FIREBASE_PRIVATE_KEY ? 'Set' : 'Not set'
+    });
     throw error;
   }
 }
