@@ -803,6 +803,8 @@ app.use(async (req, res, next) => {
 
 if (process.env.SKIP_ALEXA_VERIFICATION === '1') {
   app.post('/', adapter.getRequestHandlers());
+  // Catch-all POST to avoid 404s from minor path mismatches
+  app.post('*', adapter.getRequestHandlers());
   app.post('/test', async (req, res) => {
     try {
       return res.status(200).json({ ok: true });
@@ -813,6 +815,8 @@ if (process.env.SKIP_ALEXA_VERIFICATION === '1') {
   });
 } else {
   app.post('/', adapter.getRequestHandlers());
+  // Catch-all POST to avoid 404s from minor path mismatches
+  app.post('*', adapter.getRequestHandlers());
 }
 
 // Health check for GET requests (useful for browser checks)
