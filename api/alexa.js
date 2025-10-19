@@ -81,132 +81,235 @@ function getYearMonthFromDate(dateStr = null) {
   return `${year}-${month}`;
 }
 
-// Firebase operations
-async function getAttendance(uid, date) {
+// Firebase operations - Updated for single document structure
+async function getUserData(uid) {
   await ensureFirebaseInitialized();
   const db = admin.firestore();
-  const [year, month] = date.split('-');
-  const docRef = db.collection('attendance')
-    .doc(uid)
-    .collection(year)
-    .doc(`${year}-${month}`)
-    .collection('days')
-    .doc(date);
-  
+  const docRef = db.collection('attendance').doc(uid);
   const doc = await docRef.get();
-  return doc.exists ? doc.data() : null;
+  return doc.exists ? doc.data() : {};
 }
 
-async function setAttendance(uid, date, status, extraData = {}) {
+async function updateUserData(uid, updates) {
   await ensureFirebaseInitialized();
   const db = admin.firestore();
-  const [year, month] = date.split('-');
-  const docRef = db.collection('attendance')
-    .doc(uid)
-    .collection(year)
-    .doc(`${year}-${month}`)
-    .collection('days')
-    .doc(date);
+  const docRef = db.collection('attendance').doc(uid);
+  await docRef.set(updates, { merge: true });
+}
+
+async function getDayStatus(uid, date) {
+  const userData = await getUserData(uid);
   
-  const data = {
-    status,
-    ...extraData,
-    updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-    date: date
-  };
+  // Check records first
+  if (userData.records && userData.records[date] !== undefined) {
+    return userData.records[date] ? 'present' : 'absent';
+  }
   
-  await docRef.set(data, { merge: true });
+  // Check holidays
+  if (userData.holidays && userData.holidays.some(h => h.date === date)) {
+    const holiday = userData.holidays.find(h => h.date === date);
+    return { status: 'holiday', name: holiday.name };
+  }
+  
+  // Check not enrolled
+  if (userData.notEnrolled && userData.notEnrolled.includes(date)) {
+    return 'not-enrolled';
+  }
+  
+  return null;
+}
+
+async function setDayStatus(uid, date, status, extraData = {}) {
+  const userData = await getUserData(uid);
+  
+  // Initialize data structures if they don't exist
+  const records = userData.records || {};
+  let holidays = userData.holidays || [];
+  let notEnrolled = userData.notEnrolled || [];
+  
+  // Remove date from all status types first
+  delete records[date];
+  holidays = holidays.filter(h => h.date !== date);
+  notEnrolled = notEnrolled.filter(d => d !== date);
+  
+  // Add to appropriate status
+  if (status === 'present') {
+    records[date] = true;
+  } else if (status === 'absent') {
+    records[date] = false;
+  } else if (status === 'holiday') {
+    holidays.push({ date, name: extraData.holidayName || 'Holiday' });
+  } else if (status === 'not-enrolled') {
+    notEnrolled.push(date);
+  }
+  
+  // Update Firestore
+  await updateUserData(uid, {
+    records,
+    holidays,
+    notEnrolled,
+    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  });
+  
   return { success: true };
 }
 
-// Attendance percentage calculation
-async function calculateMonthlyAttendance(uid, yearMonth) {
-  await ensureFirebaseInitialized();
-  const db = admin.firestore();
-  const [year, month] = yearMonth.split('-');
+// Check if a date is a non-working day (Sunday or weekly day off)
+function isNonWorkingDay(dateStr, userData) {
+  const date = new Date(dateStr);
+  const dayOfWeek = date.getDay(); // 0 = Sunday, 1 = Monday, etc.
   
-  const daysRef = db.collection('attendance')
-    .doc(uid)
-    .collection(year)
-    .doc(`${year}-${month}`)
-    .collection('days');
+  // Always Sunday
+  if (dayOfWeek === 0) return true;
   
-  const snapshot = await daysRef.get();
+  // Check weekly days off
+  const weeklyDaysOff = userData.weeklyDaysOff || [];
+  if (weeklyDaysOff.includes(dayOfWeek)) return true;
   
-  if (snapshot.empty) {
-    return 0;
-  }
-  
-  let presentDays = 0;
-  let totalDays = 0;
-  
-  snapshot.forEach(doc => {
-    const data = doc.data();
-    if (data.status === 'present') {
-      presentDays++;
-    }
-    if (data.status && data.status !== 'holiday') {
-      totalDays++;
-    }
-  });
-  
-  return totalDays > 0 ? Math.round((presentDays / totalDays) * 100) : 0;
+  return false;
 }
 
-async function calculateSessionAttendance(uid) {
-  await ensureFirebaseInitialized();
-  const db = admin.firestore();
+// Monthly attendance calculation - updated for web app structure
+async function calculateMonthlyAttendance(uid, yearMonth) {
+  const userData = await getUserData(uid);
+  const [year, month] = yearMonth.split('-').map(Number);
   
-  // Get current session (you can modify this logic based on your session structure)
-  const currentYear = getLocalDate().getUTCFullYear().toString();
-  let totalPresent = 0;
-  let totalDays = 0;
+  const daysInMonth = new Date(year, month, 0).getDate();
+  let presentDays = 0;
+  let totalWorkingDays = 0;
+  const today = getFormattedDate();
   
-  try {
-    const yearRef = db.collection('attendance').doc(uid).collection(currentYear);
-    const months = await yearRef.listDocuments();
+  for (let day = 1; day <= daysInMonth; day++) {
+    const dateStr = `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
     
-    for (const monthDoc of months) {
-      const daysRef = monthDoc.collection('days');
-      const daysSnapshot = await daysRef.get();
-      
-      daysSnapshot.forEach(doc => {
-        const data = doc.data();
-        if (data.status === 'present') {
-          totalPresent++;
-        }
-        if (data.status && data.status !== 'holiday') {
-          totalDays++;
-        }
-      });
+    // Skip future dates
+    if (dateStr > today) continue;
+    
+    // Check if it's a non-working day
+    if (isNonWorkingDay(dateStr, userData)) continue;
+    
+    // Check if it's a holiday
+    const isHoliday = userData.holidays && userData.holidays.some(h => h.date === dateStr);
+    if (isHoliday) continue;
+    
+    // Check if not enrolled
+    const isNotEnrolled = userData.notEnrolled && userData.notEnrolled.includes(dateStr);
+    if (isNotEnrolled) continue;
+    
+    // Count as working day
+    totalWorkingDays++;
+    
+    // Check if present
+    if (userData.records && userData.records[dateStr] === true) {
+      presentDays++;
+    }
+  }
+  
+  return totalWorkingDays > 0 ? Math.round((presentDays / totalWorkingDays) * 100) : 0;
+}
+
+// Session attendance calculation
+async function calculateSessionAttendance(uid, sessionName = null) {
+  const userData = await getUserData(uid);
+  
+  // Get session data
+  let startDate, endDate;
+  if (sessionName && userData.sessions) {
+    const session = userData.sessions.find(s => s.name === sessionName);
+    if (session) {
+      startDate = session.startDate;
+      endDate = session.endDate;
+    }
+  }
+  
+  // If no session found, use current year
+  if (!startDate || !endDate) {
+    const currentYear = getLocalDate().getUTCFullYear();
+    startDate = `${currentYear}-01-01`;
+    endDate = `${currentYear}-12-31`;
+  }
+  
+  const start = new Date(startDate);
+  const end = new Date(endDate);
+  const today = new Date(getFormattedDate());
+  
+  let presentDays = 0;
+  let totalWorkingDays = 0;
+  
+  const currentDate = new Date(start);
+  while (currentDate <= end && currentDate <= today) {
+    const dateStr = currentDate.toISOString().split('T')[0];
+    
+    // Check if it's a non-working day
+    if (isNonWorkingDay(dateStr, userData)) {
+      currentDate.setDate(currentDate.getDate() + 1);
+      continue;
     }
     
-    return totalDays > 0 ? Math.round((totalPresent / totalDays) * 100) : 0;
-  } catch (error) {
-    console.error('Error calculating session attendance:', error);
-    return 0;
+    // Check if it's a holiday
+    const isHoliday = userData.holidays && userData.holidays.some(h => h.date === dateStr);
+    if (isHoliday) {
+      currentDate.setDate(currentDate.getDate() + 1);
+      continue;
+    }
+    
+    // Check if not enrolled
+    const isNotEnrolled = userData.notEnrolled && userData.notEnrolled.includes(dateStr);
+    if (isNotEnrolled) {
+      currentDate.setDate(currentDate.getDate() + 1);
+      continue;
+    }
+    
+    // Count as working day
+    totalWorkingDays++;
+    
+    // Check if present
+    if (userData.records && userData.records[dateStr] === true) {
+      presentDays++;
+    }
+    
+    currentDate.setDate(currentDate.getDate() + 1);
   }
+  
+  return totalWorkingDays > 0 ? Math.round((presentDays / totalWorkingDays) * 100) : 0;
 }
 
 // Session management
 async function setSelectedSession(uid, sessionName) {
-  await ensureFirebaseInitialized();
-  const db = admin.firestore();
-  const sessionRef = db.collection('sessions').doc(uid);
-  
-  await sessionRef.set({
+  await updateUserData(uid, {
     selectedSession: sessionName,
     updatedAt: admin.firestore.FieldValue.serverTimestamp()
-  }, { merge: true });
+  });
 }
 
 async function getSelectedSession(uid) {
-  await ensureFirebaseInitialized();
-  const db = admin.firestore();
-  const sessionRef = db.collection('sessions').doc(uid);
-  const doc = await sessionRef.get();
+  const userData = await getUserData(uid);
+  return userData.selectedSession || null;
+}
+
+async function saveSession(uid, sessionName, startDate, endDate) {
+  const userData = await getUserData(uid);
+  const sessions = userData.sessions || [];
   
-  return doc.exists ? doc.data().selectedSession : null;
+  // Check if session already exists
+  const existingIndex = sessions.findIndex(s => s.name === sessionName);
+  const sessionData = {
+    name: sessionName,
+    startDate,
+    endDate,
+    createdAt: new Date().toISOString()
+  };
+  
+  if (existingIndex !== -1) {
+    sessions[existingIndex] = sessionData;
+  } else {
+    sessions.push(sessionData);
+  }
+  
+  // Sort by creation date (newest first)
+  sessions.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+  
+  await updateUserData(uid, { sessions });
 }
 
 // Intent Handlers
@@ -242,15 +345,40 @@ const MarkPresentIntentHandler = {
     try {
       const uid = getUserKey(handlerInput);
       const today = getFormattedDate();
+      const userData = await getUserData(uid);
       
-      const existing = await getAttendance(uid, today);
-      if (existing && existing.status) {
+      // Check if it's a non-working day
+      if (isNonWorkingDay(today, userData)) {
         return handlerInput.responseBuilder
-          .speak(`Today is already marked as ${existing.status}.`)
+          .speak('Today is a non-working day. You cannot mark attendance on non-working days.')
           .getResponse();
       }
       
-      await setAttendance(uid, today, 'present');
+      const existingStatus = await getDayStatus(uid, today);
+      
+      if (existingStatus) {
+        if (existingStatus.status === 'present' || existingStatus === 'present') {
+          return handlerInput.responseBuilder
+            .speak('Today is already marked as present.')
+            .getResponse();
+        } else {
+          // Ask for confirmation to change status
+          const sessionAttributes = handlerInput.attributesManager.getSessionAttributes();
+          sessionAttributes.pendingStatusChange = {
+            date: today,
+            newStatus: 'present',
+            oldStatus: existingStatus.status || existingStatus
+          };
+          handlerInput.attributesManager.setSessionAttributes(sessionAttributes);
+          
+          return handlerInput.responseBuilder
+            .speak(`Today is currently marked as ${existingStatus.status || existingStatus}. Would you like to change it to present?`)
+            .reprompt('Should I change today\'s status to present?')
+            .getResponse();
+        }
+      }
+      
+      await setDayStatus(uid, today, 'present');
       
       return handlerInput.responseBuilder
         .speak('Successfully marked as present for today.')
@@ -277,15 +405,40 @@ const MarkAbsentIntentHandler = {
     try {
       const uid = getUserKey(handlerInput);
       const today = getFormattedDate();
+      const userData = await getUserData(uid);
       
-      const existing = await getAttendance(uid, today);
-      if (existing && existing.status) {
+      // Check if it's a non-working day
+      if (isNonWorkingDay(today, userData)) {
         return handlerInput.responseBuilder
-          .speak(`Today is already marked as ${existing.status}.`)
+          .speak('Today is a non-working day. You cannot mark attendance on non-working days.')
           .getResponse();
       }
       
-      await setAttendance(uid, today, 'absent');
+      const existingStatus = await getDayStatus(uid, today);
+      
+      if (existingStatus) {
+        if (existingStatus.status === 'absent' || existingStatus === 'absent') {
+          return handlerInput.responseBuilder
+            .speak('Today is already marked as absent.')
+            .getResponse();
+        } else {
+          // Ask for confirmation to change status
+          const sessionAttributes = handlerInput.attributesManager.getSessionAttributes();
+          sessionAttributes.pendingStatusChange = {
+            date: today,
+            newStatus: 'absent',
+            oldStatus: existingStatus.status || existingStatus
+          };
+          handlerInput.attributesManager.setSessionAttributes(sessionAttributes);
+          
+          return handlerInput.responseBuilder
+            .speak(`Today is currently marked as ${existingStatus.status || existingStatus}. Would you like to change it to absent?`)
+            .reprompt('Should I change today\'s status to absent?')
+            .getResponse();
+        }
+      }
+      
+      await setDayStatus(uid, today, 'absent');
       
       return handlerInput.responseBuilder
         .speak('Successfully marked as absent for today.')
@@ -322,14 +475,32 @@ const MarkHolidayIntentHandler = {
       const uid = getUserKey(handlerInput);
       const today = getFormattedDate();
       
-      const existing = await getAttendance(uid, today);
-      if (existing && existing.status) {
-        return handlerInput.responseBuilder
-          .speak(`Today is already marked as ${existing.status}.`)
-          .getResponse();
+      const existingStatus = await getDayStatus(uid, today);
+      
+      if (existingStatus) {
+        if (existingStatus.status === 'holiday' || existingStatus === 'holiday') {
+          return handlerInput.responseBuilder
+            .speak(`Today is already marked as holiday for ${existingStatus.name || 'a holiday'}.`)
+            .getResponse();
+        } else {
+          // Ask for confirmation to change status
+          const sessionAttributes = handlerInput.attributesManager.getSessionAttributes();
+          sessionAttributes.pendingStatusChange = {
+            date: today,
+            newStatus: 'holiday',
+            oldStatus: existingStatus.status || existingStatus,
+            holidayName: holidayName
+          };
+          handlerInput.attributesManager.setSessionAttributes(sessionAttributes);
+          
+          return handlerInput.responseBuilder
+            .speak(`Today is currently marked as ${existingStatus.status || existingStatus}. Would you like to change it to holiday for ${holidayName}?`)
+            .reprompt(`Should I change today\'s status to holiday for ${holidayName}?`)
+            .getResponse();
+        }
       }
       
-      await setAttendance(uid, today, 'holiday', { holidayName });
+      await setDayStatus(uid, today, 'holiday', { holidayName });
       
       return handlerInput.responseBuilder
         .speak(`Successfully marked as holiday for ${holidayName}.`)
@@ -386,10 +557,15 @@ const SessionAttendanceIntentHandler = {
     
     try {
       const uid = getUserKey(handlerInput);
-      const percentage = await calculateSessionAttendance(uid);
+      
+      // Get selected session or use default
+      const selectedSession = await getSelectedSession(uid);
+      const percentage = await calculateSessionAttendance(uid, selectedSession);
+      
+      const sessionText = selectedSession ? `for ${selectedSession} session` : 'for the current session';
       
       return handlerInput.responseBuilder
-        .speak(`Your session attendance is ${percentage} percent.`)
+        .speak(`Your session attendance ${sessionText} is ${percentage} percent.`)
         .getResponse();
         
     } catch (error) {
@@ -436,12 +612,82 @@ const SelectSessionIntentHandler = {
   }
 };
 
+const CreateSessionIntentHandler = {
+  canHandle(handlerInput) {
+    return Alexa.getRequestType(handlerInput.requestEnvelope) === 'IntentRequest' &&
+           Alexa.getIntentName(handlerInput.requestEnvelope) === 'CreateSessionIntent';
+  },
+  async handle(handlerInput) {
+    const accessToken = getAccessToken(handlerInput);
+    if (!accessToken) return requireAccountLinking(handlerInput);
+    
+    const sessionName = Alexa.getSlotValue(handlerInput.requestEnvelope, 'sessionName');
+    const startDate = Alexa.getSlotValue(handlerInput.requestEnvelope, 'startDate');
+    const endDate = Alexa.getSlotValue(handlerInput.requestEnvelope, 'endDate');
+    
+    if (!sessionName || !startDate || !endDate) {
+      return handlerInput.responseBuilder
+        .speak('Please provide a session name, start date, and end date. For example, say "create session summer 2024 from June first to August thirty first".')
+        .reprompt('Please provide the session name, start date, and end date.')
+        .getResponse();
+    }
+    
+    try {
+      const uid = getUserKey(handlerInput);
+      await saveSession(uid, sessionName, startDate, endDate);
+      
+      return handlerInput.responseBuilder
+        .speak(`Successfully created session ${sessionName} from ${startDate} to ${endDate}.`)
+        .getResponse();
+        
+    } catch (error) {
+      console.error('Error in CreateSessionIntent:', error);
+      return handlerInput.responseBuilder
+        .speak('Sorry, I encountered an error while creating the session. Please try again.')
+        .getResponse();
+    }
+  }
+};
+
 const YesIntentHandler = {
   canHandle(handlerInput) {
     return Alexa.getRequestType(handlerInput.requestEnvelope) === 'IntentRequest' &&
            Alexa.getIntentName(handlerInput.requestEnvelope) === 'AMAZON.YesIntent';
   },
-  handle(handlerInput) {
+  async handle(handlerInput) {
+    const sessionAttributes = handlerInput.attributesManager.getSessionAttributes();
+    
+    // Handle status change confirmation
+    if (sessionAttributes.pendingStatusChange) {
+      const { date, newStatus, oldStatus, holidayName } = sessionAttributes.pendingStatusChange;
+      const uid = getUserKey(handlerInput);
+      
+      try {
+        await setDayStatus(uid, date, newStatus, { holidayName });
+        
+        // Clear the pending status change
+        delete sessionAttributes.pendingStatusChange;
+        handlerInput.attributesManager.setSessionAttributes(sessionAttributes);
+        
+        let speechText = `Okay, I've changed ${date} from ${oldStatus} to ${newStatus}`;
+        if (newStatus === 'holiday' && holidayName) {
+          speechText += ` for ${holidayName}`;
+        }
+        speechText += '.';
+        
+        return handlerInput.responseBuilder
+          .speak(speechText)
+          .getResponse();
+          
+      } catch (error) {
+        console.error('Error confirming status change:', error);
+        return handlerInput.responseBuilder
+          .speak('Sorry, I encountered an error while updating the status. Please try again.')
+          .getResponse();
+      }
+    }
+    
+    // Default response
     const speechText = 'Okay, what would you like to do next?';
     
     return handlerInput.responseBuilder
@@ -457,7 +703,14 @@ const NoIntentHandler = {
            Alexa.getIntentName(handlerInput.requestEnvelope) === 'AMAZON.NoIntent';
   },
   handle(handlerInput) {
-    const speechText = 'Okay, let me know if you need anything else.';
+    // Clear any pending status change
+    const sessionAttributes = handlerInput.attributesManager.getSessionAttributes();
+    if (sessionAttributes.pendingStatusChange) {
+      delete sessionAttributes.pendingStatusChange;
+      handlerInput.attributesManager.setSessionAttributes(sessionAttributes);
+    }
+    
+    const speechText = 'Okay, I won\'t make any changes. Let me know if you need anything else.';
     
     return handlerInput.responseBuilder
       .speak(speechText)
@@ -545,6 +798,7 @@ const skill = skillBuilder
     MonthlyAttendanceIntentHandler,
     SessionAttendanceIntentHandler,
     SelectSessionIntentHandler,
+    CreateSessionIntentHandler,
     YesIntentHandler,
     NoIntentHandler,
     HelpIntentHandler,
