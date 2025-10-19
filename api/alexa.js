@@ -98,14 +98,67 @@ async function getAttendanceKey(uid) {
     
     if (credsDoc.exists) {
       const data = credsDoc.data();
+      // Return the key if it exists, otherwise use uid
       return data.key || uid;
     }
     
-    return uid;
+    // If no credentials document exists, create one with a generated key
+    const generatedKey = generateSessionCode(uid);
+    await credsRef.set({
+      key: generatedKey,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      uid: uid
+    });
+    
+    return generatedKey;
   } catch (error) {
     console.error('Error getting attendance key:', error);
-    return uid;
+    return uid; // Fallback to uid
   }
+}
+
+// Helper to ensure user has proper credentials setup
+async function ensureUserCredentials(uid) {
+  await ensureFirebaseInitialized();
+  const db = admin.firestore();
+  
+  const attendanceKey = await getAttendanceKey(uid);
+  const credsRef = db.collection('credentials').doc(uid);
+  const credsDoc = await credsRef.get();
+  
+  if (!credsDoc.exists) {
+    // Create credentials document if it doesn't exist
+    await credsRef.set({
+      key: attendanceKey,
+      uid: uid,
+      createdAt: admin.firestore.FieldValue.serverTimestamp()
+    });
+  }
+  
+  return attendanceKey;
+}
+
+// Migrate data from uid-based documents to key-based documents
+async function migrateUserData(uid) {
+  await ensureFirebaseInitialized();
+  const db = admin.firestore();
+  
+  const attendanceKey = await getAttendanceKey(uid);
+  
+  // Check if data exists under uid but not under key
+  const uidDoc = await db.collection('attendance').doc(uid).get();
+  const keyDoc = await db.collection('attendance').doc(attendanceKey).get();
+  
+  if (uidDoc.exists && !keyDoc.exists) {
+    // Migrate data from uid to key
+    console.log(`Migrating data from ${uid} to ${attendanceKey}`);
+    await db.collection('attendance').doc(attendanceKey).set(uidDoc.data());
+    
+    // Keep the old document for backward compatibility
+    // await db.collection('attendance').doc(uid).delete();
+  }
+  
+  return attendanceKey;
 }
 
 // Date helpers
@@ -161,7 +214,16 @@ async function getUserData(uid) {
   const attendanceKey = await getAttendanceKey(uid);
   const docRef = db.collection('attendance').doc(attendanceKey);
   const doc = await docRef.get();
-  return doc.exists ? doc.data() : {};
+  
+  if (doc.exists) {
+    return doc.data();
+  }
+  
+  // If no document found with the attendance key, try with uid as fallback
+  const fallbackRef = db.collection('attendance').doc(uid);
+  const fallbackDoc = await fallbackRef.get();
+  
+  return fallbackDoc.exists ? fallbackDoc.data() : {};
 }
 
 // Update user data using correct key structure
@@ -171,6 +233,14 @@ async function updateUserData(uid, updates) {
   
   const attendanceKey = await getAttendanceKey(uid);
   const docRef = db.collection('attendance').doc(attendanceKey);
+  
+  // Also ensure the credentials document exists with the key
+  const credsRef = db.collection('credentials').doc(uid);
+  await credsRef.set({ 
+    key: attendanceKey,
+    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  }, { merge: true });
+  
   await docRef.set(updates, { merge: true });
 }
 
@@ -459,7 +529,7 @@ async function getAvailableSessions(uid) {
   return userData.sessions || [];
 }
 
-// ALL INTENT HANDLERS - FIXED WITH PROPER ASYNC/AWAIT
+// ALL INTENT HANDLERS - UPDATED WITH PROPER CREDENTIALS SETUP
 
 const LaunchRequestHandler = {
   canHandle(handlerInput) {
@@ -472,12 +542,26 @@ const LaunchRequestHandler = {
       return requireAccountLinking(handlerInput);
     }
     
-    const speechText = 'Welcome to Attendance Tracker! You can mark your attendance as present, absent, or holiday. You can also ask for monthly or session attendance percentages. What would you like to do?';
-    
-    return handlerInput.responseBuilder
-      .speak(speechText)
-      .reprompt('What would you like to do? You can say mark present, mark absent, or ask for attendance percentage.')
-      .getResponse();
+    try {
+      const uid = getUserKey(handlerInput);
+      // Ensure user credentials and data migration
+      await ensureUserCredentials(uid);
+      await migrateUserData(uid);
+      
+      const speechText = 'Welcome to Attendance Tracker! You can mark your attendance as present, absent, or holiday. You can also ask for monthly or session attendance percentages. What would you like to do?';
+      
+      return handlerInput.responseBuilder
+        .speak(speechText)
+        .reprompt('What would you like to do? You can say mark present, mark absent, or ask for attendance percentage.')
+        .getResponse();
+    } catch (error) {
+      console.error('Error in LaunchRequest:', error);
+      const speechText = 'Welcome to Attendance Tracker! What would you like to do?';
+      return handlerInput.responseBuilder
+        .speak(speechText)
+        .reprompt('What would you like to do?')
+        .getResponse();
+    }
   }
 };
 
@@ -492,6 +576,11 @@ const MarkPresentIntentHandler = {
     
     try {
       const uid = getUserKey(handlerInput);
+      
+      // Ensure user credentials are set up and data is migrated
+      await ensureUserCredentials(uid);
+      await migrateUserData(uid);
+      
       const today = getFormattedDate();
       const userData = await getUserData(uid);
       
@@ -550,6 +639,11 @@ const MarkAbsentIntentHandler = {
     
     try {
       const uid = getUserKey(handlerInput);
+      
+      // Ensure user credentials are set up and data is migrated
+      await ensureUserCredentials(uid);
+      await migrateUserData(uid);
+      
       const today = getFormattedDate();
       const userData = await getUserData(uid);
       
@@ -617,6 +711,11 @@ const MarkHolidayIntentHandler = {
     
     try {
       const uid = getUserKey(handlerInput);
+      
+      // Ensure user credentials are set up and data is migrated
+      await ensureUserCredentials(uid);
+      await migrateUserData(uid);
+      
       const today = getFormattedDate();
       
       const existingStatus = await getDayStatus(uid, today);
@@ -669,6 +768,11 @@ const MonthlyAttendanceIntentHandler = {
     
     try {
       const uid = getUserKey(handlerInput);
+      
+      // Ensure user credentials are set up and data is migrated
+      await ensureUserCredentials(uid);
+      await migrateUserData(uid);
+      
       const monthSlot = Alexa.getSlotValue(handlerInput.requestEnvelope, 'month');
       const yearMonth = monthSlot ? getYearMonthFromDate(monthSlot) : getYearMonthFromDate();
       
@@ -700,6 +804,11 @@ const SessionAttendanceIntentHandler = {
     
     try {
       const uid = getUserKey(handlerInput);
+      
+      // Ensure user credentials are set up and data is migrated
+      await ensureUserCredentials(uid);
+      await migrateUserData(uid);
+      
       const sessionNameSlot = Alexa.getSlotValue(handlerInput.requestEnvelope, 'sessionName');
       
       const result = await calculateSessionAttendance(uid, sessionNameSlot);
@@ -728,6 +837,11 @@ const GetAttendancePercentageIntentHandler = {
     
     try {
       const uid = getUserKey(handlerInput);
+      
+      // Ensure user credentials are set up and data is migrated
+      await ensureUserCredentials(uid);
+      await migrateUserData(uid);
+      
       const result = await calculateSessionAttendance(uid);
       
       return handlerInput.responseBuilder
@@ -757,6 +871,11 @@ const SetAlexaPresetIntentHandler = {
     if (!sessionName) {
       try {
         const uid = getUserKey(handlerInput);
+        
+        // Ensure user credentials are set up and data is migrated
+        await ensureUserCredentials(uid);
+        await migrateUserData(uid);
+        
         const sessions = await getAvailableSessions(uid);
         const presetSession = await getAlexaPresetSession(uid);
         
@@ -793,6 +912,11 @@ const SetAlexaPresetIntentHandler = {
     
     try {
       const uid = getUserKey(handlerInput);
+      
+      // Ensure user credentials are set up and data is migrated
+      await ensureUserCredentials(uid);
+      await migrateUserData(uid);
+      
       const result = await setAlexaPresetSession(uid, sessionName);
       
       if (result.success) {
@@ -826,6 +950,11 @@ const GetAlexaPresetIntentHandler = {
     
     try {
       const uid = getUserKey(handlerInput);
+      
+      // Ensure user credentials are set up and data is migrated
+      await ensureUserCredentials(uid);
+      await migrateUserData(uid);
+      
       const presetSession = await getAlexaPresetSession(uid);
       
       if (presetSession) {
@@ -858,6 +987,11 @@ const ClearAlexaPresetIntentHandler = {
     
     try {
       const uid = getUserKey(handlerInput);
+      
+      // Ensure user credentials are set up and data is migrated
+      await ensureUserCredentials(uid);
+      await migrateUserData(uid);
+      
       const result = await clearAlexaPresetSession(uid);
       
       if (result.success) {
@@ -893,6 +1027,11 @@ const SelectSessionIntentHandler = {
     if (!sessionName) {
       try {
         const uid = getUserKey(handlerInput);
+        
+        // Ensure user credentials are set up and data is migrated
+        await ensureUserCredentials(uid);
+        await migrateUserData(uid);
+        
         const sessions = await getAvailableSessions(uid);
         
         if (sessions.length === 0) {
@@ -921,6 +1060,11 @@ const SelectSessionIntentHandler = {
     
     try {
       const uid = getUserKey(handlerInput);
+      
+      // Ensure user credentials are set up and data is migrated
+      await ensureUserCredentials(uid);
+      await migrateUserData(uid);
+      
       const sessions = await getAvailableSessions(uid);
       
       const exactCodeMatch = sessions.find(s => s.code === sessionName);
@@ -989,21 +1133,34 @@ const CreateSessionIntentHandler = {
     const setAsPreset = Alexa.getSlotValue(handlerInput.requestEnvelope, 'setAsPreset');
     const shouldSetAsPreset = setAsPreset === 'yes' || setAsPreset === 'true';
     
-    const sessionAttributes = handlerInput.attributesManager.getSessionAttributes();
-    sessionAttributes.inSessionCreation = true;
-    sessionAttributes.sessionCreationStep = 'name';
-    sessionAttributes.shouldSetAsPreset = shouldSetAsPreset;
-    handlerInput.attributesManager.setSessionAttributes(sessionAttributes);
-    
-    let speechText = 'Okay, let\'s create a new session. What would you like to name this session?';
-    if (shouldSetAsPreset) {
-      speechText += ' This session will be set as your Alexa preset.';
+    try {
+      const uid = getUserKey(handlerInput);
+      
+      // Ensure user credentials are set up and data is migrated
+      await ensureUserCredentials(uid);
+      await migrateUserData(uid);
+      
+      const sessionAttributes = handlerInput.attributesManager.getSessionAttributes();
+      sessionAttributes.inSessionCreation = true;
+      sessionAttributes.sessionCreationStep = 'name';
+      sessionAttributes.shouldSetAsPreset = shouldSetAsPreset;
+      handlerInput.attributesManager.setSessionAttributes(sessionAttributes);
+      
+      let speechText = 'Okay, let\'s create a new session. What would you like to name this session?';
+      if (shouldSetAsPreset) {
+        speechText += ' This session will be set as your Alexa preset.';
+      }
+      
+      return handlerInput.responseBuilder
+        .speak(speechText)
+        .reprompt('What should I call this session?')
+        .getResponse();
+    } catch (error) {
+      console.error('Error in CreateSessionIntent:', error);
+      return handlerInput.responseBuilder
+        .speak('Sorry, I encountered an error while starting session creation. Please try again.')
+        .getResponse();
     }
-    
-    return handlerInput.responseBuilder
-      .speak(speechText)
-      .reprompt('What should I call this session?')
-      .getResponse();
   }
 };
 
@@ -1029,6 +1186,10 @@ const CreateSessionWithNameIntentHandler = {
     
     try {
       const uid = getUserKey(handlerInput);
+      
+      // Ensure user credentials are set up and data is migrated
+      await ensureUserCredentials(uid);
+      await migrateUserData(uid);
       
       const sessionAttributes = handlerInput.attributesManager.getSessionAttributes();
       sessionAttributes.inSessionCreation = true;
@@ -1142,6 +1303,11 @@ const ListSessionsIntentHandler = {
     
     try {
       const uid = getUserKey(handlerInput);
+      
+      // Ensure user credentials are set up and data is migrated
+      await ensureUserCredentials(uid);
+      await migrateUserData(uid);
+      
       const sessions = await getAvailableSessions(uid);
       const presetSession = await getAlexaPresetSession(uid);
       
@@ -1197,6 +1363,10 @@ const YesIntentHandler = {
       const uid = getUserKey(handlerInput);
       
       try {
+        // Ensure user credentials are set up and data is migrated
+        await ensureUserCredentials(uid);
+        await migrateUserData(uid);
+        
         await setDayStatus(uid, date, newStatus, { holidayName });
         
         delete sessionAttributes.pendingStatusChange;
