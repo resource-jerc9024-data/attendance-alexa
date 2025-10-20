@@ -157,16 +157,7 @@ async function getOrCreateAlexaUser(alexaUserId) {
     
     await alexaUserRef.set(alexaUserData);
     
-    // Also create the attendance record in organized structure
-    const attendanceRef = db.collection('attendance').doc(alexaUserId);
-    await attendanceRef.set({
-      userId: alexaUserId,
-      type: 'alexa',
-      createdAt: admin.firestore.FieldValue.serverTimestamp(),
-      records: {},
-      holidays: [],
-      notEnrolled: []
-    });
+    console.log(`Created organized Alexa user: ${alexaUserId}`);
   }
   
   return alexaUserId;
@@ -241,25 +232,49 @@ async function createStandaloneAlexaUser(alexaUserId, alexaProfile) {
       createdAt: admin.firestore.FieldValue.serverTimestamp()
     });
   
-  // Initialize attendance record for this Alexa user
-  const attendanceRef = db.collection('attendance').doc(userKey);
-  await attendanceRef.set({
-    userId: alexaUserId,
-    type: 'alexa',
-    createdAt: admin.firestore.FieldValue.serverTimestamp(),
-    records: {},
-    holidays: [],
-    notEnrolled: [],
-    sessions: []
-  });
+  console.log(`Created standalone Alexa user: ${alexaUserId}`);
   
   return alexaUserId;
+}
+
+// Find Google user by email in existing credentials structure
+async function findGoogleUserByEmail(email) {
+  await ensureFirebaseInitialized();
+  const db = admin.firestore();
+  
+  try {
+    const credentialsRef = db.collection('DB').doc('credentials');
+    const credentialsDoc = await credentialsRef.get();
+    
+    if (!credentialsDoc.exists) {
+      return null;
+    }
+    
+    const credentialsData = credentialsDoc.data();
+    
+    // Search through all Google users in credentials
+    for (const [googleUid, userData] of Object.entries(credentialsData)) {
+      if (userData && userData.email === email) {
+        console.log(`Found matching Google user: ${googleUid} for email: ${email}`);
+        return {
+          uid: googleUid,
+          key: userData.key || googleUid,
+          email: userData.email,
+          name: userData.name
+        };
+      }
+    }
+    
+    return null;
+  } catch (error) {
+    console.error('Error finding Google user by email:', error);
+    return null;
+  }
 }
 
 // Enhanced findOrCreateUserMapping with better linking
 async function findOrCreateUserMapping(handlerInput, alexaUserId, accessToken) {
   await ensureFirebaseInitialized();
-  const db = admin.firestore();
   
   try {
     // Get Alexa user profile
@@ -269,38 +284,16 @@ async function findOrCreateUserMapping(handlerInput, alexaUserId, accessToken) {
     if (alexaEmail) {
       console.log(`Looking for Google user with email: ${alexaEmail}`);
       
-      // Search through all Google users in credentials
-      const credentialsSnapshot = await db.collection('DB').doc('credentials').get();
+      // Search for existing Google user with matching email
+      const googleUser = await findGoogleUserByEmail(alexaEmail);
       
-      if (credentialsSnapshot.exists) {
-        const credentialsData = credentialsSnapshot.data();
+      if (googleUser) {
+        console.log(`Found matching Google user: ${googleUser.uid}`);
         
-        // Iterate through all Google UIDs
-        for (const [googleUid, userCollections] of Object.entries(credentialsData)) {
-          if (userCollections && typeof userCollections === 'object') {
-            // Check if this Google user has a profile with matching email
-            const profileRef = db.collection('DB').doc('credentials')
-              .collection(googleUid).doc('profile');
-            
-            const profileDoc = await profileRef.get();
-            
-            if (profileDoc.exists) {
-              const profileData = profileDoc.data();
-              
-              if (profileData.email === alexaEmail) {
-                console.log(`Found matching Google user: ${googleUid}`);
-                
-                // Get the key from Google user's profile
-                const userKey = profileData.key || googleUid;
-                
-                // CREATE THE MAPPING in organized Alexa structure
-                await createAlexaToGoogleMapping(alexaUserId, googleUid, alexaProfile, userKey);
-                
-                return googleUid; // Now use the Google UID for all operations
-              }
-            }
-          }
-        }
+        // Create organized mapping
+        await createAlexaToGoogleMapping(alexaUserId, googleUser.uid, alexaProfile, googleUser.key);
+        
+        return googleUser.uid; // Now use the Google UID for all operations
       }
       
       console.log('No matching Google user found by email');
@@ -345,52 +338,6 @@ async function getUserKey(handlerInput) {
       return 'anonymous';
     }
   }
-}
-
-// Update ensureUserCredentials to work with organized structure
-async function ensureUserCredentials(uid) {
-  await ensureFirebaseInitialized();
-  const db = admin.firestore();
-  
-  // Check if this is an Alexa user ID format
-  if (uid.startsWith('amzn1.ask.account.')) {
-    // This is an Alexa user - check if they're in organized structure
-    const alexaProfileRef = db.collection('DB').doc('credentials')
-      .collection('alexa').doc(uid)
-      .collection('profile').doc('default');
-    
-    const alexaProfile = await alexaProfileRef.get();
-    
-    if (alexaProfile.exists) {
-      const profileData = alexaProfile.data();
-      
-      // If mapped to Google user, return Google user's key
-      if (profileData.mappedToGoogle && profileData.googleUid) {
-        const googleProfileRef = db.collection('DB').doc('credentials')
-          .collection(profileData.googleUid).doc('profile');
-        
-        const googleProfile = await googleProfileRef.get();
-        if (googleProfile.exists && googleProfile.data().key) {
-          return String(googleProfile.data().key).trim();
-        }
-      }
-      
-      // Return Alexa user's own key
-      return profileData.key || uid;
-    }
-    
-    // If no organized entry exists yet, create one
-    return await getOrCreateAlexaUser(uid);
-  }
-  
-  // This is a Google user - use existing logic
-  const ref = db.collection('DB').doc('credentials').collection(uid).doc('profile');
-  const snap = await ref.get();
-  if (snap.exists && snap.data() && snap.data().key) {
-    return String(snap.data().key).trim();
-  }
-  
-  return uid;
 }
 
 // Update getAttendanceKey to handle organized structure
