@@ -63,7 +63,45 @@ async function ensureFirebaseInitialized() {
   }
 }
 
-// Utility functions
+// UTILITY FUNCTIONS
+function getFormattedDate(date = new Date()) {
+  const d = new Date(date);
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+function getLocalDate() {
+  return new Date();
+}
+
+function generateSessionCode(sessionName) {
+  const base = sessionName.toLowerCase().replace(/[^a-z0-9]/g, '').substring(0, 8);
+  const random = Math.random().toString(36).substring(2, 6);
+  return base + random;
+}
+
+function formatAlexaDate(dateStr) {
+  try {
+    const date = new Date(dateStr);
+    return date.toLocaleDateString('en-US', { 
+      year: 'numeric', 
+      month: 'long', 
+      day: 'numeric' 
+    });
+  } catch (error) {
+    return dateStr;
+  }
+}
+
+function getYearMonthFromDate(dateStr = null) {
+  const date = dateStr ? new Date(dateStr) : new Date();
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  return `${year}-${month}`;
+}
+
 function getAccessToken(handlerInput) {
   try {
     return handlerInput.requestEnvelope.context.System.user.accessToken;
@@ -87,82 +125,46 @@ function getUserKey(handlerInput) {
   }
 }
 
-// Get the actual attendance key from credentials
+// Resolve API key from DB/credentials/{uid}/profile
 async function getAttendanceKey(uid) {
   await ensureFirebaseInitialized();
   const db = admin.firestore();
-  
   try {
-    const credsQuery = db.collection('credentials').where('uid', '==', uid).limit(1);
-    const querySnapshot = await credsQuery.get();
-    
-    if (!querySnapshot.empty) {
-      const credsDoc = querySnapshot.docs[0];
-      const data = credsDoc.data();
-      return data.key || uid;
+    const ref = db.collection('DB').doc('credentials').collection(uid).doc('profile');
+    const snap = await ref.get();
+    if (snap.exists && snap.data() && snap.data().key) {
+      return String(snap.data().key).trim();
     }
-    
-    const generatedKey = generateSessionCode(uid);
-    const newCredsRef = db.collection('credentials').doc();
-    await newCredsRef.set({
-      key: generatedKey,
-      uid: uid,
-      username: `AlexaUser_${uid.substring(0, 8)}`,
-      createdAt: admin.firestore.FieldValue.serverTimestamp()
-    });
-    
-    return generatedKey;
-  } catch (error) {
-    console.error('Error getting attendance key:', error);
-    return uid;
-  }
+  } catch (_) { /* ignore and fall back */ }
+  return uid;
 }
 
-// Get username from credentials
-async function getUsername(uid) {
-  await ensureFirebaseInitialized();
-  const db = admin.firestore();
-  
-  try {
-    const credsQuery = db.collection('credentials').where('uid', '==', uid).limit(1);
-    const querySnapshot = await credsQuery.get();
-    
-    if (!querySnapshot.empty) {
-      const credsDoc = querySnapshot.docs[0];
-      const data = credsDoc.data();
-      return data.username || `User_${uid.substring(0, 8)}`;
-    }
-    
-    return `User_${uid.substring(0, 8)}`;
-  } catch (error) {
-    console.error('Error getting username:', error);
-    return `User_${uid.substring(0, 8)}`;
-  }
-}
-
-// Helper to ensure user has proper credentials setup
+// Helper retained for compatibility, now just resolves the key (no writes)
 async function ensureUserCredentials(uid) {
+  await ensureFirebaseInitialized();
+  const attendanceKey = await getAttendanceKey(uid);
+  return attendanceKey;
+}
+
+// Migrate data from uid-based documents to key-based documents
+async function migrateUserData(uid) {
   await ensureFirebaseInitialized();
   const db = admin.firestore();
   
   const attendanceKey = await getAttendanceKey(uid);
-  const credsQuery = db.collection('credentials').where('uid', '==', uid).limit(1);
-  const querySnapshot = await credsQuery.get();
   
-  if (querySnapshot.empty) {
-    const newCredsRef = db.collection('credentials').doc();
-    await newCredsRef.set({
-      key: attendanceKey,
-      uid: uid,
-      username: `AlexaUser_${uid.substring(0, 8)}`,
-      createdAt: admin.firestore.FieldValue.serverTimestamp()
-    });
+  const uidDoc = await db.collection('attendance').doc(uid).get();
+  const keyDoc = await db.collection('attendance').doc(attendanceKey).get();
+  
+  if (uidDoc.exists && !keyDoc.exists) {
+    console.log(`Migrating data from ${uid} to ${attendanceKey}`);
+    await db.collection('attendance').doc(attendanceKey).set(uidDoc.data());
   }
   
   return attendanceKey;
 }
 
-// Get user data using the correct key structure
+// Get the actual attendance key from credentials
 async function getUserData(uid) {
   await ensureFirebaseInitialized();
   const db = admin.firestore();
@@ -175,14 +177,10 @@ async function getUserData(uid) {
     return doc.data();
   }
   
-  return {
-    records: {},
-    holidays: [],
-    notEnrolled: [],
-    weeklyDaysOff: [],
-    sessions: [],
-    reminders: { yearly: 75 }
-  };
+  const fallbackRef = db.collection('attendance').doc(uid);
+  const fallbackDoc = await fallbackRef.get();
+  
+  return fallbackDoc.exists ? fallbackDoc.data() : {};
 }
 
 // Update user data using correct key structure
@@ -192,53 +190,8 @@ async function updateUserData(uid, updates) {
   
   const attendanceKey = await getAttendanceKey(uid);
   const docRef = db.collection('attendance').doc(attendanceKey);
-  
+
   await docRef.set(updates, { merge: true });
-}
-
-// Date helpers
-function getLocalDate() {
-  const timezoneOffset = parseInt(process.env.TIMEZONE_OFFSET_MINUTES || '330');
-  const now = new Date();
-  return new Date(now.getTime() + timezoneOffset * 60000);
-}
-
-function getFormattedDate() {
-  const date = getLocalDate();
-  const year = date.getUTCFullYear();
-  const month = String(date.getUTCMonth() + 1).padStart(2, '0');
-  const day = String(date.getUTCDate()).padStart(2, '0');
-  return `${year}-${month}-${day}`;
-}
-
-function getYearMonthFromDate(dateStr = null) {
-  const date = dateStr ? new Date(dateStr) : getLocalDate();
-  const year = date.getUTCFullYear();
-  const month = String(date.getUTCMonth() + 1).padStart(2, '0');
-  return `${year}-${month}`;
-}
-
-function formatAlexaDate(dateStr) {
-  try {
-    const date = new Date(dateStr);
-    return date.toLocaleDateString('en-US', { 
-      year: 'numeric', 
-      month: 'long', 
-      day: 'numeric' 
-    });
-  } catch (error) {
-    return dateStr;
-  }
-}
-
-// Generate session code
-function generateSessionCode(sessionName) {
-  const code = sessionName
-    .toLowerCase()
-    .replace(/[^a-z0-9]/g, '')
-    .substring(0, 8);
-  const timestamp = Date.now().toString(36);
-  return `${code}_${timestamp}`;
 }
 
 // Get day status with correct structure
@@ -338,28 +291,31 @@ async function calculateMonthlyAttendance(uid, yearMonth) {
   return totalWorkingDays > 0 ? Math.round((presentDays / totalWorkingDays) * 100) : 0;
 }
 
-// Session attendance calculation
+// Session attendance calculation using selectedSession when present
 async function calculateSessionAttendance(uid, sessionName = null) {
   const userData = await getUserData(uid);
   
   let startDate, endDate;
-  let sessionUsed = 'current year';
+  let sessionUsed = 'current session';
   
-  if (userData.sessions && userData.sessions.length > 0) {
-    if (sessionName) {
-      const session = userData.sessions.find(s => 
-        s.name.toLowerCase() === sessionName.toLowerCase()
-      );
-      if (session) {
-        startDate = session.startDate;
-        endDate = session.endDate;
-        sessionUsed = session.name;
-      }
-    } else {
-      const recentSession = userData.sessions[0];
-      startDate = recentSession.startDate;
-      endDate = recentSession.endDate;
-      sessionUsed = recentSession.name;
+  const sessions = userData.sessions || [];
+  const selectedSession = sessions.find(s => s.isSelected === true);
+  
+  if (selectedSession) {
+    startDate = selectedSession.startDate;
+    endDate = selectedSession.endDate || getFormattedDate();
+    sessionUsed = selectedSession.name || sessionUsed;
+  }
+  
+  if ((!startDate || !endDate) && sessionName) {
+    const session = sessions.find(s => 
+      s.name.toLowerCase() === sessionName.toLowerCase() || 
+      s.code === sessionName
+    );
+    if (session) {
+      startDate = session.startDate;
+      endDate = session.endDate;
+      sessionUsed = session.name;
     }
   }
   
@@ -367,6 +323,7 @@ async function calculateSessionAttendance(uid, sessionName = null) {
     const currentYear = getLocalDate().getUTCFullYear();
     startDate = `${currentYear}-01-01`;
     endDate = `${currentYear}-12-31`;
+    sessionUsed = 'current year';
   }
   
   const start = new Date(startDate);
@@ -416,31 +373,89 @@ async function calculateSessionAttendance(uid, sessionName = null) {
   };
 }
 
-// Save session
-async function saveSession(uid, sessionName, startDate, endDate) {
+// Set selected session (store in sessions array with isSelected: true)
+async function setAlexaPresetSession(uid, sessionIdentifier) {
+  const userData = await getUserData(uid);
+  if (!userData.sessions || userData.sessions.length === 0) {
+    return { success: false, error: 'No sessions found' };
+  }
+  
+  const found = userData.sessions.find(s => 
+    s.code === sessionIdentifier || 
+    (s.name && s.name.toLowerCase() === String(sessionIdentifier).toLowerCase())
+  );
+  
+  if (!found) return { success: false, error: 'Session not found' };
+  
+  const sessions = userData.sessions.map(session => ({
+    ...session,
+    isSelected: session.code === found.code
+  }));
+  
+  await updateUserData(uid, { sessions });
+  return { success: true, session: found };
+}
+
+// Get selected session
+async function getAlexaPresetSession(uid) {
+  const userData = await getUserData(uid);
+  const sessions = userData.sessions || [];
+  return sessions.find(s => s.isSelected === true) || null;
+}
+
+// Clear selected session
+async function clearAlexaPresetSession(uid) {
   const userData = await getUserData(uid);
   const sessions = userData.sessions || [];
   
+  const updatedSessions = sessions.map(session => ({
+    ...session,
+    isSelected: false
+  }));
+  
+  await updateUserData(uid, { sessions: updatedSessions });
+  return { success: true };
+}
+
+// Save session (stores in sessions array, can set as selected)
+async function saveSession(uid, sessionName, startDate, endDate, setAsPreset = false) {
+  const userData = await getUserData(uid);
+  const sessions = userData.sessions || [];
+  
+  const sessionCode = generateSessionCode(sessionName);
+  
   const sessionData = {
     name: sessionName,
+    code: sessionCode,
     startDate,
     endDate,
-    createdAt: new Date().toISOString()
+    createdAt: new Date().toISOString(),
+    isSelected: setAsPreset
   };
   
   const existingIndex = sessions.findIndex(s => 
-    s.name.toLowerCase() === sessionName.toLowerCase()
+    s.name.toLowerCase() === sessionName.toLowerCase() || 
+    s.code === sessionCode
   );
   
+  let updatedSessions;
   if (existingIndex !== -1) {
-    sessions[existingIndex] = sessionData;
+    updatedSessions = [...sessions];
+    updatedSessions[existingIndex] = sessionData;
   } else {
-    sessions.push(sessionData);
+    updatedSessions = [...sessions, sessionData];
   }
   
-  sessions.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+  if (setAsPreset) {
+    updatedSessions = updatedSessions.map(session => ({
+      ...session,
+      isSelected: session.code === sessionCode
+    }));
+  }
   
-  await updateUserData(uid, { sessions });
+  updatedSessions.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+  
+  await updateUserData(uid, { sessions: updatedSessions });
   
   return sessionData;
 }
@@ -451,7 +466,7 @@ async function getAvailableSessions(uid) {
   return userData.sessions || [];
 }
 
-// INTENT HANDLERS - ALL PROPERLY ASYNC
+// ALL INTENT HANDLERS - FIXED WITH PROPER ASYNC/AWAIT
 
 const LaunchRequestHandler = {
   canHandle(handlerInput) {
@@ -466,10 +481,10 @@ const LaunchRequestHandler = {
     
     try {
       const uid = getUserKey(handlerInput);
-      await ensureUserCredentials(uid); // FIXED: Properly awaited
+      await ensureUserCredentials(uid); // FIXED: Added await
+      await migrateUserData(uid); // FIXED: Added await
       
-      const username = await getUsername(uid); // FIXED: Properly awaited
-      const speechText = `Welcome to Attendance Tracker ${username}! You can mark your attendance as present, absent, or holiday. You can also ask for monthly or session attendance percentages. What would you like to do?`;
+      const speechText = 'Welcome to Attendance Tracker! You can mark your attendance as present, absent, or holiday. You can also ask for monthly or session attendance percentages. What would you like to do?';
       
       return handlerInput.responseBuilder
         .speak(speechText)
@@ -497,10 +512,12 @@ const MarkPresentIntentHandler = {
     
     try {
       const uid = getUserKey(handlerInput);
-      await ensureUserCredentials(uid); // FIXED: Properly awaited
+      
+      await ensureUserCredentials(uid); // FIXED: Added await
+      await migrateUserData(uid); // FIXED: Added await
       
       const today = getFormattedDate();
-      const userData = await getUserData(uid); // FIXED: Properly awaited
+      const userData = await getUserData(uid); // FIXED: Added await
       
       if (isNonWorkingDay(today, userData)) {
         return handlerInput.responseBuilder
@@ -508,7 +525,7 @@ const MarkPresentIntentHandler = {
           .getResponse();
       }
       
-      const existingStatus = await getDayStatus(uid, today); // FIXED: Properly awaited
+      const existingStatus = await getDayStatus(uid, today); // FIXED: Added await
       
       if (existingStatus) {
         if (existingStatus.status === 'present' || existingStatus === 'present') {
@@ -531,7 +548,7 @@ const MarkPresentIntentHandler = {
         }
       }
       
-      await setDayStatus(uid, today, 'present'); // FIXED: Properly awaited
+      await setDayStatus(uid, today, 'present'); // FIXED: Added await
       
       return handlerInput.responseBuilder
         .speak('Successfully marked as present for today.')
@@ -557,10 +574,12 @@ const MarkAbsentIntentHandler = {
     
     try {
       const uid = getUserKey(handlerInput);
-      await ensureUserCredentials(uid); // FIXED: Properly awaited
+      
+      await ensureUserCredentials(uid); // FIXED: Added await
+      await migrateUserData(uid); // FIXED: Added await
       
       const today = getFormattedDate();
-      const userData = await getUserData(uid); // FIXED: Properly awaited
+      const userData = await getUserData(uid); // FIXED: Added await
       
       if (isNonWorkingDay(today, userData)) {
         return handlerInput.responseBuilder
@@ -568,7 +587,7 @@ const MarkAbsentIntentHandler = {
           .getResponse();
       }
       
-      const existingStatus = await getDayStatus(uid, today); // FIXED: Properly awaited
+      const existingStatus = await getDayStatus(uid, today); // FIXED: Added await
       
       if (existingStatus) {
         if (existingStatus.status === 'absent' || existingStatus === 'absent') {
@@ -591,7 +610,7 @@ const MarkAbsentIntentHandler = {
         }
       }
       
-      await setDayStatus(uid, today, 'absent'); // FIXED: Properly awaited
+      await setDayStatus(uid, today, 'absent'); // FIXED: Added await
       
       return handlerInput.responseBuilder
         .speak('Successfully marked as absent for today.')
@@ -626,10 +645,13 @@ const MarkHolidayIntentHandler = {
     
     try {
       const uid = getUserKey(handlerInput);
-      await ensureUserCredentials(uid); // FIXED: Properly awaited
+      
+      await ensureUserCredentials(uid); // FIXED: Added await
+      await migrateUserData(uid); // FIXED: Added await
       
       const today = getFormattedDate();
-      const existingStatus = await getDayStatus(uid, today); // FIXED: Properly awaited
+      
+      const existingStatus = await getDayStatus(uid, today); // FIXED: Added await
       
       if (existingStatus) {
         if (existingStatus.status === 'holiday' || existingStatus === 'holiday') {
@@ -653,7 +675,7 @@ const MarkHolidayIntentHandler = {
         }
       }
       
-      await setDayStatus(uid, today, 'holiday', { holidayName }); // FIXED: Properly awaited
+      await setDayStatus(uid, today, 'holiday', { holidayName }); // FIXED: Added await
       
       return handlerInput.responseBuilder
         .speak(`Successfully marked as holiday for ${holidayName}.`)
@@ -679,12 +701,14 @@ const MonthlyAttendanceIntentHandler = {
     
     try {
       const uid = getUserKey(handlerInput);
-      await ensureUserCredentials(uid); // FIXED: Properly awaited
+      
+      await ensureUserCredentials(uid); // FIXED: Added await
+      await migrateUserData(uid); // FIXED: Added await
       
       const monthSlot = Alexa.getSlotValue(handlerInput.requestEnvelope, 'month');
       const yearMonth = monthSlot ? getYearMonthFromDate(monthSlot) : getYearMonthFromDate();
       
-      const percentage = await calculateMonthlyAttendance(uid, yearMonth); // FIXED: Properly awaited
+      const percentage = await calculateMonthlyAttendance(uid, yearMonth); // FIXED: Added await
       
       const monthName = new Date(yearMonth + '-01').toLocaleString('en-US', { month: 'long', year: 'numeric' });
       
@@ -712,11 +736,13 @@ const SessionAttendanceIntentHandler = {
     
     try {
       const uid = getUserKey(handlerInput);
-      await ensureUserCredentials(uid); // FIXED: Properly awaited
+      
+      await ensureUserCredentials(uid); // FIXED: Added await
+      await migrateUserData(uid); // FIXED: Added await
       
       const sessionNameSlot = Alexa.getSlotValue(handlerInput.requestEnvelope, 'sessionName');
       
-      const result = await calculateSessionAttendance(uid, sessionNameSlot); // FIXED: Properly awaited
+      const result = await calculateSessionAttendance(uid, sessionNameSlot); // FIXED: Added await
       
       return handlerInput.responseBuilder
         .speak(`Your session attendance for ${result.sessionName} is ${result.percentage} percent. You have attended ${result.presentDays} out of ${result.totalWorkingDays} working days.`)
@@ -742,9 +768,11 @@ const GetAttendancePercentageIntentHandler = {
     
     try {
       const uid = getUserKey(handlerInput);
-      await ensureUserCredentials(uid); // FIXED: Properly awaited
       
-      const result = await calculateSessionAttendance(uid); // FIXED: Properly awaited
+      await ensureUserCredentials(uid); // FIXED: Added await
+      await migrateUserData(uid); // FIXED: Added await
+      
+      const result = await calculateSessionAttendance(uid); // FIXED: Added await
       
       return handlerInput.responseBuilder
         .speak(`Your attendance percentage is ${result.percentage} percent for ${result.sessionName}. You have attended ${result.presentDays} out of ${result.totalWorkingDays} working days.`)
@@ -754,6 +782,158 @@ const GetAttendancePercentageIntentHandler = {
       console.error('Error in GetAttendancePercentageIntent:', error);
       return handlerInput.responseBuilder
         .speak('Sorry, I encountered an error while fetching your attendance percentage. Please try again.')
+        .getResponse();
+    }
+  }
+};
+
+const SetAlexaPresetIntentHandler = {
+  canHandle(handlerInput) {
+    return Alexa.getRequestType(handlerInput.requestEnvelope) === 'IntentRequest' &&
+           Alexa.getIntentName(handlerInput.requestEnvelope) === 'SetAlexaPresetIntent';
+  },
+  async handle(handlerInput) { // FIXED: Added async
+    const accessToken = getAccessToken(handlerInput);
+    if (!accessToken) return requireAccountLinking(handlerInput);
+    
+    const sessionName = Alexa.getSlotValue(handlerInput.requestEnvelope, 'sessionName');
+    
+    if (!sessionName) {
+      try {
+        const uid = getUserKey(handlerInput);
+        
+        await ensureUserCredentials(uid); // FIXED: Added await
+        await migrateUserData(uid); // FIXED: Added await
+        
+        const sessions = await getAvailableSessions(uid); // FIXED: Added await
+        const presetSession = await getAlexaPresetSession(uid); // FIXED: Added await
+        
+        if (sessions.length === 0) {
+          return handlerInput.responseBuilder
+            .speak('You don\'t have any sessions yet. Please create a session first by saying "create session".')
+            .getResponse();
+        }
+        
+        let speechText = `Your available sessions are: `;
+        sessions.slice(0, 5).forEach((session, index) => {
+          speechText += `${session.name}${session.isSelected ? ' (Alexa preset)' : ''}`;
+          if (index < Math.min(sessions.length, 5) - 1) speechText += ', ';
+        });
+        
+        if (presetSession) {
+          speechText += `. Your current Alexa preset session is ${presetSession.name}.`;
+        }
+        
+        speechText += ' Which session would you like to set as Alexa preset?';
+        
+        return handlerInput.responseBuilder
+          .speak(speechText)
+          .reprompt('Please tell me which session you want to set as Alexa preset.')
+          .getResponse();
+          
+      } catch (error) {
+        console.error('Error listing sessions:', error);
+        return handlerInput.responseBuilder
+          .speak('Sorry, I encountered an error while fetching your sessions. Please try again.')
+          .getResponse();
+      }
+    }
+    
+    try {
+      const uid = getUserKey(handlerInput);
+      
+      await ensureUserCredentials(uid); // FIXED: Added await
+      await migrateUserData(uid); // FIXED: Added await
+      
+      const result = await setAlexaPresetSession(uid, sessionName); // FIXED: Added await
+      
+      if (result.success) {
+        return handlerInput.responseBuilder
+          .speak(`Okay, I've set ${result.session.name} as your Alexa preset session. Now when you ask for session attendance, I'll automatically use this session.`)
+          .getResponse();
+      } else {
+        return handlerInput.responseBuilder
+          .speak(`Session "${sessionName}" not found. Please tell me which session you want to set as Alexa preset.`)
+          .reprompt('Which session should I set as Alexa preset?')
+          .getResponse();
+      }
+        
+    } catch (error) {
+      console.error('Error in SetAlexaPresetIntent:', error);
+      return handlerInput.responseBuilder
+        .speak('Sorry, I encountered an error while setting Alexa preset session. Please try again.')
+        .getResponse();
+    }
+  }
+};
+
+const GetAlexaPresetIntentHandler = {
+  canHandle(handlerInput) {
+    return Alexa.getRequestType(handlerInput.requestEnvelope) === 'IntentRequest' &&
+           Alexa.getIntentName(handlerInput.requestEnvelope) === 'GetAlexaPresetIntent';
+  },
+  async handle(handlerInput) { // FIXED: Added async
+    const accessToken = getAccessToken(handlerInput);
+    if (!accessToken) return requireAccountLinking(handlerInput);
+    
+    try {
+      const uid = getUserKey(handlerInput);
+      
+      await ensureUserCredentials(uid); // FIXED: Added await
+      await migrateUserData(uid); // FIXED: Added await
+      
+      const presetSession = await getAlexaPresetSession(uid); // FIXED: Added await
+      
+      if (presetSession) {
+        return handlerInput.responseBuilder
+          .speak(`Your current Alexa preset session is ${presetSession.name}. It runs from ${formatAlexaDate(presetSession.startDate)} to ${formatAlexaDate(presetSession.endDate)}.`)
+          .getResponse();
+      } else {
+        return handlerInput.responseBuilder
+          .speak('You don\'t have an Alexa preset session set. You can set one by saying "set [session name] as Alexa preset".')
+          .getResponse();
+      }
+        
+    } catch (error) {
+      console.error('Error in GetAlexaPresetIntent:', error);
+      return handlerInput.responseBuilder
+        .speak('Sorry, I encountered an error while fetching your Alexa preset session. Please try again.')
+        .getResponse();
+    }
+  }
+};
+
+const ClearAlexaPresetIntentHandler = {
+  canHandle(handlerInput) {
+    return Alexa.getRequestType(handlerInput.requestEnvelope) === 'IntentRequest' &&
+           Alexa.getIntentName(handlerInput.requestEnvelope) === 'ClearAlexaPresetIntent';
+  },
+  async handle(handlerInput) { // FIXED: Added async
+    const accessToken = getAccessToken(handlerInput);
+    if (!accessToken) return requireAccountLinking(handlerInput);
+    
+    try {
+      const uid = getUserKey(handlerInput);
+      
+      await ensureUserCredentials(uid); // FIXED: Added await
+      await migrateUserData(uid); // FIXED: Added await
+      
+      const result = await clearAlexaPresetSession(uid); // FIXED: Added await
+      
+      if (result.success) {
+        return handlerInput.responseBuilder
+          .speak('I\'ve cleared your Alexa preset session. Next time you ask for attendance, I\'ll ask which session you want to use.')
+          .getResponse();
+      } else {
+        return handlerInput.responseBuilder
+          .speak('There was no Alexa preset session to clear.')
+          .getResponse();
+      }
+        
+    } catch (error) {
+      console.error('Error in ClearAlexaPresetIntent:', error);
+      return handlerInput.responseBuilder
+        .speak('Sorry, I encountered an error while clearing your Alexa preset session. Please try again.')
         .getResponse();
     }
   }
@@ -773,9 +953,11 @@ const SelectSessionIntentHandler = {
     if (!sessionName) {
       try {
         const uid = getUserKey(handlerInput);
-        await ensureUserCredentials(uid); // FIXED: Properly awaited
         
-        const sessions = await getAvailableSessions(uid); // FIXED: Properly awaited
+        await ensureUserCredentials(uid); // FIXED: Added await
+        await migrateUserData(uid); // FIXED: Added await
+        
+        const sessions = await getAvailableSessions(uid); // FIXED: Added await
         
         if (sessions.length === 0) {
           return handlerInput.responseBuilder
@@ -803,19 +985,46 @@ const SelectSessionIntentHandler = {
     
     try {
       const uid = getUserKey(handlerInput);
-      await ensureUserCredentials(uid); // FIXED: Properly awaited
       
-      const sessions = await getAvailableSessions(uid); // FIXED: Properly awaited
+      await ensureUserCredentials(uid); // FIXED: Added await
+      await migrateUserData(uid); // FIXED: Added await
       
-      const session = sessions.find(s => 
+      const sessions = await getAvailableSessions(uid); // FIXED: Added await
+      
+      const exactCodeMatch = sessions.find(s => s.code === sessionName);
+      if (exactCodeMatch) {
+        await setAlexaPresetSession(uid, exactCodeMatch.code); // FIXED: Added await
+        return handlerInput.responseBuilder
+          .speak(`Okay, I've set ${exactCodeMatch.name} as your current session and Alexa preset.`)
+          .getResponse();
+      }
+      
+      const nameMatches = sessions.filter(s => 
         s.name.toLowerCase() === sessionName.toLowerCase()
       );
       
-      if (session) {
+      if (nameMatches.length === 1) {
+        await setAlexaPresetSession(uid, nameMatches[0].code); // FIXED: Added await
         return handlerInput.responseBuilder
-          .speak(`Okay, I'll use session "${session.name}" for your attendance queries.`)
+          .speak(`Okay, I've set ${nameMatches[0].name} as your current session and Alexa preset.`)
+          .getResponse();
+      } else if (nameMatches.length > 1) {
+        const sessionCodes = nameMatches.map(s => s.code).join(', ');
+        const dateRanges = nameMatches.map(s => 
+          `${formatAlexaDate(s.startDate)} to ${formatAlexaDate(s.endDate)}`
+        ).join(' and ');
+        
+        return handlerInput.responseBuilder
+          .speak(`I found ${nameMatches.length} sessions named "${sessionName}" with date ranges: ${dateRanges}. Please specify which one by using the session code: ${sessionCodes}`)
+          .reprompt('Please tell me the session code to select the correct session.')
           .getResponse();
       } else {
+        if (sessions.length === 0) {
+          return handlerInput.responseBuilder
+            .speak(`Session "${sessionName}" not found. You don't have any sessions yet. Please create a session first by saying "create session".`)
+            .getResponse();
+        }
+        
         let sessionList = sessions.slice(0, 5).map(s => s.name).join(', ');
         if (sessions.length > 5) {
           sessionList += ', and more';
@@ -845,16 +1054,25 @@ const CreateSessionIntentHandler = {
     const accessToken = getAccessToken(handlerInput);
     if (!accessToken) return requireAccountLinking(handlerInput);
     
+    const setAsPreset = Alexa.getSlotValue(handlerInput.requestEnvelope, 'setAsPreset');
+    const shouldSetAsPreset = setAsPreset === 'yes' || setAsPreset === 'true';
+    
     try {
       const uid = getUserKey(handlerInput);
-      await ensureUserCredentials(uid); // FIXED: Properly awaited
+      
+      await ensureUserCredentials(uid); // FIXED: Added await
+      await migrateUserData(uid); // FIXED: Added await
       
       const sessionAttributes = handlerInput.attributesManager.getSessionAttributes();
       sessionAttributes.inSessionCreation = true;
       sessionAttributes.sessionCreationStep = 'name';
+      sessionAttributes.shouldSetAsPreset = shouldSetAsPreset;
       handlerInput.attributesManager.setSessionAttributes(sessionAttributes);
       
-      const speechText = 'Okay, let\'s create a new session. What would you like to name this session?';
+      let speechText = 'Okay, let\'s create a new session. What would you like to name this session?';
+      if (shouldSetAsPreset) {
+        speechText += ' This session will be set as your Alexa preset.';
+      }
       
       return handlerInput.responseBuilder
         .speak(speechText)
@@ -879,6 +1097,8 @@ const CreateSessionWithNameIntentHandler = {
     if (!accessToken) return requireAccountLinking(handlerInput);
     
     const sessionName = Alexa.getSlotValue(handlerInput.requestEnvelope, 'sessionName');
+    const setAsPreset = Alexa.getSlotValue(handlerInput.requestEnvelope, 'setAsPreset');
+    const shouldSetAsPreset = setAsPreset === 'yes' || setAsPreset === 'true';
     
     if (!sessionName) {
       return handlerInput.responseBuilder
@@ -889,12 +1109,15 @@ const CreateSessionWithNameIntentHandler = {
     
     try {
       const uid = getUserKey(handlerInput);
-      await ensureUserCredentials(uid); // FIXED: Properly awaited
+      
+      await ensureUserCredentials(uid); // FIXED: Added await
+      await migrateUserData(uid); // FIXED: Added await
       
       const sessionAttributes = handlerInput.attributesManager.getSessionAttributes();
       sessionAttributes.inSessionCreation = true;
       sessionAttributes.sessionCreationStep = 'startDate';
       sessionAttributes.pendingSessionName = sessionName;
+      sessionAttributes.shouldSetAsPreset = shouldSetAsPreset;
       handlerInput.attributesManager.setSessionAttributes(sessionAttributes);
       
       return handlerInput.responseBuilder
@@ -945,16 +1168,21 @@ const DateIntentHandler = {
           const sessionName = sessionAttributes.pendingSessionName;
           const startDate = sessionAttributes.pendingStartDate;
           const endDate = dateValue;
+          const shouldSetAsPreset = sessionAttributes.shouldSetAsPreset || false;
           
-          const sessionData = await saveSession(uid, sessionName, startDate, endDate); // FIXED: Properly awaited
+          const sessionData = await saveSession(uid, sessionName, startDate, endDate, shouldSetAsPreset); // FIXED: Added await
           
           delete sessionAttributes.inSessionCreation;
           delete sessionAttributes.sessionCreationStep;
           delete sessionAttributes.pendingSessionName;
           delete sessionAttributes.pendingStartDate;
+          delete sessionAttributes.shouldSetAsPreset;
           handlerInput.attributesManager.setSessionAttributes(sessionAttributes);
           
-          const speechText = `Successfully created session "${sessionData.name}" from ${formatAlexaDate(startDate)} to ${formatAlexaDate(endDate)}.`;
+          let speechText = `Successfully created session "${sessionData.name}" from ${formatAlexaDate(startDate)} to ${formatAlexaDate(endDate)}.`;
+          if (shouldSetAsPreset) {
+            speechText += ' I\'ve also set it as your Alexa preset session.';
+          }
           
           return handlerInput.responseBuilder
             .speak(speechText)
@@ -993,9 +1221,12 @@ const ListSessionsIntentHandler = {
     
     try {
       const uid = getUserKey(handlerInput);
-      await ensureUserCredentials(uid); // FIXED: Properly awaited
       
-      const sessions = await getAvailableSessions(uid); // FIXED: Properly awaited
+      await ensureUserCredentials(uid); // FIXED: Added await
+      await migrateUserData(uid); // FIXED: Added await
+      
+      const sessions = await getAvailableSessions(uid); // FIXED: Added await
+      const presetSession = await getAlexaPresetSession(uid); // FIXED: Added await
       
       if (sessions.length === 0) {
         return handlerInput.responseBuilder
@@ -1007,6 +1238,9 @@ const ListSessionsIntentHandler = {
       
       sessions.slice(0, 5).forEach((session, index) => {
         speechText += `${session.name}`;
+        if (session.isSelected) {
+          speechText += ' (Alexa preset)';
+        }
         if (index < Math.min(sessions.length, 5) - 1) {
           speechText += ', ';
         }
@@ -1014,6 +1248,10 @@ const ListSessionsIntentHandler = {
       
       if (sessions.length > 5) {
         speechText += `, and ${sessions.length - 5} more`;
+      }
+      
+      if (presetSession) {
+        speechText += `. Your Alexa preset session is ${presetSession.name}.`;
       }
       
       return handlerInput.responseBuilder
@@ -1042,8 +1280,10 @@ const YesIntentHandler = {
       const uid = getUserKey(handlerInput);
       
       try {
-        await ensureUserCredentials(uid); // FIXED: Properly awaited
-        await setDayStatus(uid, date, newStatus, { holidayName }); // FIXED: Properly awaited
+        await ensureUserCredentials(uid); // FIXED: Added await
+        await migrateUserData(uid); // FIXED: Added await
+        
+        await setDayStatus(uid, date, newStatus, { holidayName }); // FIXED: Added await
         
         delete sessionAttributes.pendingStatusChange;
         handlerInput.attributesManager.setSessionAttributes(sessionAttributes);
@@ -1100,6 +1340,7 @@ const NoIntentHandler = {
       delete sessionAttributes.sessionCreationStep;
       delete sessionAttributes.pendingSessionName;
       delete sessionAttributes.pendingStartDate;
+      delete sessionAttributes.shouldSetAsPreset;
     }
     handlerInput.attributesManager.setSessionAttributes(sessionAttributes);
     
@@ -1117,7 +1358,7 @@ const HelpIntentHandler = {
            Alexa.getIntentName(handlerInput.requestEnvelope) === 'AMAZON.HelpIntent';
   },
   handle(handlerInput) {
-    const speechText = 'You can mark your attendance by saying: "mark present", "mark absent", or "mark holiday for [holiday name]". You can also ask for "monthly attendance" or "session attendance" to get your percentage. To create a session, say "create session" or "create session Summer 2024". When asked for dates, you can say things like "June first 2024" or "2024-06-01". To switch sessions, say "use session [session name]". What would you like to do?';
+    const speechText = 'You can mark your attendance by saying: "mark present", "mark absent", or "mark holiday for [holiday name]". You can also ask for "monthly attendance" or "session attendance" to get your percentage. To create a session, say "create session" or "create session Summer 2024". When asked for dates, you can say things like "June first 2024" or "2024-06-01". To switch sessions, say "use session [session name]" or "use session [session code]". You can also set an Alexa preset session by saying "set [session name] as Alexa preset". What would you like to do?';
     
     return handlerInput.responseBuilder
       .speak(speechText)
@@ -1191,6 +1432,9 @@ const skill = skillBuilder
     MonthlyAttendanceIntentHandler,
     SessionAttendanceIntentHandler,
     GetAttendancePercentageIntentHandler,
+    SetAlexaPresetIntentHandler,
+    GetAlexaPresetIntentHandler,
+    ClearAlexaPresetIntentHandler,
     SelectSessionIntentHandler,
     CreateSessionIntentHandler,
     CreateSessionWithNameIntentHandler,
@@ -1206,11 +1450,11 @@ const skill = skillBuilder
   .addErrorHandlers(ErrorHandler)
   .create();
 
-// FIXED: Express setup with proper async middleware
+// Express setup with FIXED middleware
 const app = express();
 const adapter = new ExpressAdapter(skill, true, true);
 
-// FIXED: Proper async middleware with next() inside try block
+// FIXED: Proper async middleware with error handling
 app.use(async (req, res, next) => {
   if (req.method === 'POST' && req.headers['content-type'] === 'application/json') {
     try {
@@ -1220,7 +1464,7 @@ app.use(async (req, res, next) => {
         encoding: 'utf8'
       });
       req.body = JSON.parse(req.rawBody.toString());
-      next(); // Moved inside try block
+      next(); // Properly inside try block
     } catch (error) {
       console.error('Error parsing body:', error);
       return res.status(400).json({ error: 'Bad Request - Invalid JSON' });
